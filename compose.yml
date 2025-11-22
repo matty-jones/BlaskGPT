@@ -1,0 +1,54 @@
+# /opt/llm/compose.yml
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
+    runtime: nvidia
+    deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
+    ports: ["9000:8000"]
+    volumes: ["/opt/llm/hf_cache:/root/.cache/huggingface"]
+    command:
+      - --model
+      - Qwen/Qwen2.5-7B-Instruct-AWQ
+      - --dtype
+      - auto
+      - --max-model-len
+      - "3072"
+      - --gpu-memory-utilization
+      - "0.70"
+      - --max-num-seqs
+      - "64"
+      - --api-key
+      - local-dev-key
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: /opt/llm
+      dockerfile: api-gateway/Dockerfile
+    container_name: api-gateway
+    ports: ["8080:8080"]
+    volumes:
+      - /opt/llm:/app
+      - /opt/llm/.env:/app/.env:ro
+    environment:
+      - HA_URL=${HA_URL}
+      - HA_ACCESS_TOKEN=${HA_ACCESS_TOKEN}
+      - VLLM_URL=http://vllm:8000
+      - VLLM_API_KEY=local-dev-key
+      - API_PORT=8080
+      - API_HOST=0.0.0.0
+    depends_on:
+      - vllm
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+networks:
+  llm-network:
+    driver: bridge

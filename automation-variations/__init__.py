@@ -1,0 +1,1 @@
+"""Automation variation generator package"""
