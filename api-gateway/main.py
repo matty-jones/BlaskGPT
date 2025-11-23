@@ -104,7 +104,6 @@ class ChatResponse(BaseModel):
 class VariationRequest(BaseModel):
     """Request model for automation variation generation"""
     base_message: str
-    style: Optional[str] = "humorous"  # humorous, formal, casual, etc.
     count: Optional[int] = 1
 
 
@@ -218,7 +217,6 @@ async def generate_variations(request: VariationRequest):
         # For now, return a placeholder
         variations = await _generate_message_variations(
             request.base_message,
-            request.style,
             request.count
         )
         return VariationResponse(variations=variations)
@@ -237,10 +235,9 @@ async def webhook_variation(request: Request):
     try:
         data = await request.json()
         base_message = data.get("message", "")
-        style = data.get("style", "humorous")
         count = data.get("count", 1)
         
-        variations = await _generate_message_variations(base_message, style, count)
+        variations = await _generate_message_variations(base_message, count)
         
         # Return in format HA expects
         return {"variations": variations}
@@ -1201,12 +1198,11 @@ async def _handle_automation_variation(message: str, context: Optional[Dict] = N
     Handle automation variation generation
     """
     try:
-        style = context.get("style", "humorous") if context else "humorous"
         count = context.get("count", 1) if context else 1
         
         VarSettings = automation_module.Settings
         var_settings = VarSettings()
-        variations = await gen_variations(message, style, count, var_settings)
+        variations = await gen_variations(message, count, var_settings)
         
         if len(variations) == 1:
             return variations[0]
@@ -1248,14 +1244,14 @@ async def _handle_general_chat(message: str) -> str:
         raise HTTPException(status_code=500, detail=f"Error calling LLM: {str(e)}")
 
 
-async def _generate_message_variations(base_message: str, style: str, count: int) -> list[str]:
+async def _generate_message_variations(base_message: str, count: int) -> list[str]:
     """
     Generate variations of a message using LLM
     """
     try:
         VarSettings = automation_module.Settings
         var_settings = VarSettings()
-        variations = await gen_variations(base_message, style, count, var_settings)
+        variations = await gen_variations(base_message, count, var_settings)
         return variations
     except Exception as e:
         logger.error(f"Error generating variations: {e}", exc_info=True)

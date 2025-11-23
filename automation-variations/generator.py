@@ -27,8 +27,14 @@ class Settings(BaseSettings):
 def load_prompt_template() -> str:
     """Load the automation variation prompt template"""
     try:
-        with open("/opt/llm/prompts/automation_variation.txt", "r") as f:
-            return f.read()
+        # Try /app first (container path), then /opt/llm (host path)
+        for path in ["/app/prompts/automation_variation.txt", "/opt/llm/prompts/automation_variation.txt"]:
+            try:
+                with open(path, "r") as f:
+                    return f.read()
+            except FileNotFoundError:
+                continue
+        raise FileNotFoundError("Prompt file not found in expected locations")
     except Exception as e:
         logger.warning(f"Could not load prompt template: {e}")
         return """You are a creative assistant that generates variations of automation messages.
@@ -37,7 +43,6 @@ Generate creative variations while maintaining the same intent and meaning."""
 
 async def generate_variations(
     base_message: str,
-    style: str = "humorous",
     count: int = 1,
     settings: Optional[Settings] = None
 ) -> List[str]:
@@ -46,7 +51,6 @@ async def generate_variations(
     
     Args:
         base_message: The original message to vary
-        style: Style of variation (humorous, formal, casual, friendly)
         count: Number of variations to generate
         settings: Optional settings instance
     
@@ -58,11 +62,10 @@ async def generate_variations(
     
     system_prompt = load_prompt_template()
     
-    user_prompt = f"""Generate {count} variation(s) of this message in a {style} style:
+    user_prompt = f"""[Input]
+Base: "{base_message}"
 
-Base message: "{base_message}"
-
-Provide {count} variation(s), one per line, without numbering or bullets."""
+[Output]"""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
