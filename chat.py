@@ -20,9 +20,12 @@ def send_chat_request(
     use_case: Optional[str] = None,
     base_url: str = "http://localhost:8080"
 ) -> dict:
-    """Send a chat request to the API gateway"""
-    url = f"{base_url}/chat"
-    payload = {"message": message}
+    """Send a chat request to the API gateway using OpenAI-compatible format"""
+    url = f"{base_url}/v1/chat/completions"
+    payload = {
+        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+        "messages": [{"role": "user", "content": message}]
+    }
     if use_case:
         payload["use_case"] = use_case
     
@@ -43,24 +46,33 @@ def format_response(response: dict) -> str:
     """Format the response nicely for terminal output"""
     output = []
     
-    # Response text
-    response_text = response.get("response", "")
-    if response_text:
-        output.append("Response:")
-        output.append("=" * 70)
-        output.append(response_text)
-        output.append("")
+    # Extract response from OpenAI format
+    if "choices" in response and len(response["choices"]) > 0:
+        message = response["choices"][0].get("message", {})
+        response_text = message.get("content", "")
+        if response_text:
+            output.append("Response:")
+            output.append("=" * 70)
+            output.append(response_text)
+            output.append("")
+    else:
+        # Fallback for old format
+        response_text = response.get("response", "")
+        if response_text:
+            output.append("Response:")
+            output.append("=" * 70)
+            output.append(response_text)
+            output.append("")
     
     # Metadata
-    metadata = response.get("metadata", {})
-    use_case = response.get("use_case", "auto-detected")
+    model = response.get("model", "unknown")
+    usage = response.get("usage", {})
     
     output.append("Metadata:")
     output.append("-" * 70)
-    output.append(f"  Use Case: {use_case}")
-    if metadata:
-        for key, value in metadata.items():
-            output.append(f"  {key.title()}: {value}")
+    output.append(f"  Model: {model}")
+    if usage:
+        output.append(f"  Tokens: {usage.get('total_tokens', 'N/A')} (prompt: {usage.get('prompt_tokens', 'N/A')}, completion: {usage.get('completion_tokens', 'N/A')})")
     
     return "\n".join(output)
 
@@ -93,7 +105,7 @@ Examples:
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
-        help="Base URL of the API gateway (default: http://localhost:8080)"
+        help="Base URL of the API gateway (default: http://localhost:8080). The endpoint /v1/chat/completions will be used."
     )
     
     parser.add_argument(

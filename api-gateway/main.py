@@ -11,13 +11,15 @@ import os
 import sys
 import json
 import logging
-from typing import Optional, Dict, Any, List
+import time
+import uuid
+from typing import Optional, Dict, Any, List, Union
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 import httpx
 
@@ -86,19 +88,58 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-# Request/Response Models
-class ChatRequest(BaseModel):
-    """Request model for chat/completion requests"""
-    message: str
-    use_case: Optional[str] = None  # "ha_command", "googling", "automation_variation"
-    context: Optional[Dict[str, Any]] = None
+# OpenAI-compatible Request/Response Models
+class ChatMessage(BaseModel):
+    """OpenAI message format"""
+    role: str  # "system", "user", "assistant", "tool", "function"
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    function_call: Optional[Dict[str, Any]] = None
 
 
-class ChatResponse(BaseModel):
-    """Response model for chat/completion responses"""
-    response: str
-    use_case: str
-    metadata: Optional[Dict[str, Any]] = None
+class ChatCompletionRequest(BaseModel):
+    """OpenAI-compatible chat completion request"""
+    model: str
+    messages: List[ChatMessage]
+    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    n: Optional[int] = 1
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
+    user: Optional[str] = None
+    # Custom extension: use_case hint (optional, for internal routing)
+    use_case: Optional[str] = None
+
+
+class ChatCompletionChoice(BaseModel):
+    """OpenAI chat completion choice"""
+    index: int
+    message: ChatMessage
+    finish_reason: str  # "stop", "length", "tool_calls", "function_call", "content_filter"
+
+
+class Usage(BaseModel):
+    """OpenAI token usage"""
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class ChatCompletionResponse(BaseModel):
+    """OpenAI-compatible chat completion response"""
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[ChatCompletionChoice]
+    usage: Optional[Usage] = None
 
 
 class VariationRequest(BaseModel):
@@ -169,40 +210,88 @@ async def health_check():
     return {"status": "healthy", "service": "api-gateway"}
 
 
-# Chat/completion endpoint
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+# OpenAI-compatible chat completion endpoint
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(request: ChatCompletionRequest):
     """
-    Main chat endpoint that routes to appropriate handler based on use case
+    OpenAI-compatible chat completion endpoint that routes to appropriate handler based on use case
     """
     try:
+        # Extract user message from messages array
+        # Find the last user message (or system + user combination)
+        user_message = None
+        system_message = None
+        
+        for msg in reversed(request.messages):
+            if msg.role == "user" and user_message is None:
+                # Extract content - handle both string and list formats
+                if isinstance(msg.content, str):
+                    user_message = msg.content
+                elif isinstance(msg.content, list):
+                    # Handle content array format (e.g., text blocks)
+                    text_parts = [item.get("text", "") for item in msg.content if isinstance(item, dict) and item.get("type") == "text"]
+                    user_message = " ".join(text_parts) if text_parts else ""
+                break
+            elif msg.role == "system" and system_message is None:
+                if isinstance(msg.content, str):
+                    system_message = msg.content
+        
+        if not user_message:
+            raise HTTPException(status_code=400, detail="No user message found in messages array")
+        
         # Determine use case if not specified
         if request.use_case:
             use_case = request.use_case
         else:
-            use_case = await _detect_use_case(request.message)
+            use_case = await _detect_use_case(user_message)
         
-        logger.info(f"Processing request: use_case={use_case}, message={request.message[:50]}...")
+        logger.info(f"Processing request: use_case={use_case}, message={user_message[:50]}...")
         
         # Route to appropriate handler
         if use_case == "ha_command":
-            response_text = await _handle_ha_command(request.message, request.context)
+            response_text = await _handle_ha_command(user_message, None)
         elif use_case == "googling":
-            response_text = await _handle_googling(request.message)
+            response_text = await _handle_googling(user_message)
         elif use_case == "automation_variation":
-            response_text = await _handle_automation_variation(request.message, request.context)
+            response_text = await _handle_automation_variation(user_message, None)
         else:
             # Default: general chat
-            response_text = await _handle_general_chat(request.message)
+            response_text = await _handle_general_chat(user_message)
         
-        return ChatResponse(
-            response=response_text,
-            use_case=use_case,
-            metadata={"model": "Qwen/Qwen2.5-7B-Instruct-AWQ"}
+        # Build OpenAI-compatible response
+        response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created_time = int(time.time())
+        
+        # Estimate token usage (rough approximation)
+        prompt_tokens = len(user_message.split()) * 1.3  # Rough estimate
+        completion_tokens = len(response_text.split()) * 1.3
+        total_tokens = int(prompt_tokens + completion_tokens)
+        
+        return ChatCompletionResponse(
+            id=response_id,
+            created=created_time,
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=response_text
+                    ),
+                    finish_reason="stop"
+                )
+            ],
+            usage=Usage(
+                prompt_tokens=int(prompt_tokens),
+                completion_tokens=int(completion_tokens),
+                total_tokens=total_tokens
+            )
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing chat request: {e}", exc_info=True)
+        logger.error(f"Error processing chat completion request: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -329,10 +418,26 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
     
     try:
         # Load HA command system prompt
-        try:
-            with open("/opt/llm/prompts/ha_command_system.txt", "r") as f:
-                system_prompt = f.read()
-        except Exception:
+        # Try /app/prompts/ first (Docker container path), then /opt/llm/prompts/ (host path)
+        prompt_paths = [
+            "/app/prompts/ha_command_system.txt",
+            "/opt/llm/prompts/ha_command_system.txt"
+        ]
+        system_prompt = None
+        for prompt_path in prompt_paths:
+            try:
+                with open(prompt_path, "r") as f:
+                    system_prompt = f.read()
+                logger.info(f"Loaded HA command system prompt from {prompt_path} ({len(system_prompt)} characters)")
+                break
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(f"Failed to load HA command system prompt from {prompt_path}: {e}")
+                continue
+        
+        if system_prompt is None:
+            logger.error(f"Failed to load HA command system prompt from any path: {prompt_paths}")
             system_prompt = "You are a helpful assistant that controls Home Assistant devices through natural language commands."
         
         # Get function schemas
@@ -341,7 +446,23 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
         # First call: Get function call from LLM
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Convert functions to tools format (vLLM requires tools, not functions)
-            tools = functions  # The format is compatible
+            # vLLM may reject empty properties, so add a dummy property for functions with no params
+            import copy
+            tools = []
+            for func in functions:
+                func_copy = copy.deepcopy(func)
+                if "function" in func_copy and "parameters" in func_copy["function"]:
+                    params = func_copy["function"]["parameters"]
+                    # If properties is empty, vLLM may reject it - add a dummy property
+                    if isinstance(params, dict) and params.get("properties") == {}:
+                        # Add a dummy property that we'll ignore in the handler
+                        params["properties"] = {
+                            "_": {
+                                "type": "string",
+                                "description": "This function takes no parameters. Ignore this field."
+                            }
+                        }
+                tools.append(func_copy)
             
             request_payload = {
                 "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
@@ -352,18 +473,39 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                 "tools": tools,  # Use tools instead of functions
                 "tool_choice": "auto",  # Use tool_choice instead of function_call
                 "temperature": 0.3,
-                "max_tokens": 500
+                "max_tokens": 200  # Reduced to fit within context limit (model max: 3072, input: ~2645)
             }
             
-            response = await client.post(
-                f"{settings.vllm_url}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {settings.vllm_api_key}",
-                    "Content-Type": "application/json"
-                },
-                json=request_payload
-            )
-            response.raise_for_status()
+            # Log the request for debugging (truncate tools to avoid huge logs)
+            logger.debug(f"Sending request to vLLM with {len(tools)} tools")
+            try:
+                response = await client.post(
+                    f"{settings.vllm_url}/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.vllm_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=request_payload
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Log the error response body for debugging
+                error_body = ""
+                try:
+                    error_body = e.response.text
+                    logger.error(f"vLLM returned {e.response.status_code}. Error body: {error_body[:500]}")
+                except:
+                    pass
+                raise
+            except httpx.HTTPStatusError as e:
+                # Log the error response body for debugging
+                error_body = ""
+                try:
+                    error_body = e.response.text
+                    logger.error(f"vLLM error response: {error_body}")
+                except:
+                    pass
+                raise
             result = response.json()
             message_obj = result["choices"][0]["message"]
             
@@ -382,8 +524,26 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                     function_args = tool_call_data.get("arguments", {})
                     logger.info(f"Found XML tool call: {function_name} with args {function_args}")
                     
-                    # Execute the function (pass original message for semantic matching)
-                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                    # If listing lights for control purposes, also check switch domain
+                    # Many light switches are in the switch domain, not light domain
+                    if function_name == "list_available_entities" and function_args.get("domain") == "light":
+                        message_lower = message.lower() if message else ""
+                        # If this is for controlling lights (not just listing), check both domains
+                        if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
+                            logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
+                            light_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                            switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
+                            # Combine results
+                            if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
+                                execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
+                            else:
+                                execution_result = light_result
+                        else:
+                            # Just listing, use single domain
+                            execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                    else:
+                        # Execute the function (pass original message for semantic matching)
+                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
                     
                     logger.info(f"Function execution result: {execution_result}")
                     
@@ -400,6 +560,16 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                         retry_args = {"domain": domain} if domain else {}
                         execution_result = await _execute_ha_function("list_available_entities", retry_args, original_message=message)
                         logger.info(f"Retry result: {execution_result}")
+                    
+                    # If searching for lights and found 0 results, also check switch domain
+                    # Many light switches are implemented as switches, not lights
+                    if function_name == "list_available_entities" and function_args.get("domain") == "light" and "Found 0 entities" in str(execution_result):
+                        logger.info("No entities found in 'light' domain, also checking 'switch' domain for light switches")
+                        switch_result = await _execute_ha_function("list_available_entities", {"domain": "switch"}, original_message=message)
+                        if "Found 0 entities" not in str(switch_result):
+                            # Combine results from both domains
+                            execution_result = f"Found in 'light' domain: {execution_result}\n\nFound in 'switch' domain (may include light switches): {switch_result}"
+                            logger.info(f"Combined result: {execution_result[:200]}")
                         
                         # Now let the LLM do semantic matching with the full list
                         response2 = await client.post(
@@ -446,7 +616,7 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                                 logger.warning(f"Function execution returned error: {execution_result2}")
                                 return execution_result2
                             
-                            # Final confirmation
+                            # Final confirmation (this is always an action, so brief confirmation is appropriate)
                             response3 = await client.post(
                                 f"{settings.vllm_url}/v1/chat/completions",
                                 headers={
@@ -472,26 +642,51 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                             return result3["choices"][0]["message"]["content"]
                     
                     # Second call: Get natural language response about the action
-                    response2 = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": content},
-                                {"role": "tool", "name": function_name, "content": str(execution_result)},
-                                {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                            ],
-                            "tools": tools,
-                            "temperature": 0.3,
-                            "max_tokens": 50
-                        }
-                    )
+                    # For list queries, let the LLM respond naturally with the full list
+                    # For action commands, provide a brief confirmation
+                    if function_name == "list_available_entities":
+                        # Let LLM naturally format the list response
+                        response2 = await client.post(
+                            f"{settings.vllm_url}/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {settings.vllm_api_key}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                                "messages": [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": message},
+                                    {"role": "assistant", "content": content},
+                                    {"role": "tool", "name": function_name, "content": str(execution_result)}
+                                ],
+                                "tools": tools,
+                                "temperature": 0.3,
+                                "max_tokens": 200
+                            }
+                        )
+                    else:
+                        # For action commands, brief confirmation
+                        response2 = await client.post(
+                            f"{settings.vllm_url}/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {settings.vllm_api_key}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                                "messages": [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": message},
+                                    {"role": "assistant", "content": content},
+                                    {"role": "tool", "name": function_name, "content": str(execution_result)},
+                                    {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
+                                ],
+                                "tools": tools,
+                                "temperature": 0.3,
+                                "max_tokens": 50
+                            }
+                        )
                     response2.raise_for_status()
                     result2 = response2.json()
                     return result2["choices"][0]["message"]["content"]
@@ -517,8 +712,26 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                 
                 logger.info(f"Executing function: {function_name} with args: {function_args}")
                 
-                # Execute the function (pass original message for semantic matching)
-                execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                # If listing lights for control purposes, also check switch domain
+                # Many light switches are in the switch domain, not light domain
+                if function_name == "list_available_entities" and function_args.get("domain") == "light":
+                    message_lower = message.lower() if message else ""
+                    # If this is for controlling lights (not just listing), check both domains
+                    if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
+                        logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
+                        light_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                        switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
+                        # Combine results
+                        if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
+                            execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
+                        else:
+                            execution_result = light_result
+                    else:
+                        # Just listing, use single domain
+                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                else:
+                    # Execute the function (pass original message for semantic matching)
+                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
                 
                 logger.info(f"Function execution result: {execution_result}")
                 
@@ -528,26 +741,51 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                     return execution_result
                 
                 # Second call: Get natural language response about the action
-                response2 = await client.post(
-                    f"{settings.vllm_url}/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.vllm_api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": message},
-                            {"role": "assistant", "content": None, "tool_calls": tool_calls},
-                            {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]},
-                            {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                        ],
-                        "tools": tools,
-                        "temperature": 0.3,
-                        "max_tokens": 50
-                    }
-                )
+                # For list queries, let the LLM respond naturally with the full list
+                # For action commands, provide a brief confirmation
+                if function_name == "list_available_entities":
+                    # Let LLM naturally format the list response
+                    response2 = await client.post(
+                        f"{settings.vllm_url}/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.vllm_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": message},
+                                {"role": "assistant", "content": None, "tool_calls": tool_calls},
+                                {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]}
+                            ],
+                            "tools": tools,
+                            "temperature": 0.3,
+                            "max_tokens": 200
+                        }
+                    )
+                else:
+                    # For action commands, brief confirmation
+                    response2 = await client.post(
+                        f"{settings.vllm_url}/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.vllm_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": message},
+                                {"role": "assistant", "content": None, "tool_calls": tool_calls},
+                                {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]},
+                                {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
+                            ],
+                            "tools": tools,
+                            "temperature": 0.3,
+                            "max_tokens": 50
+                        }
+                    )
                 response2.raise_for_status()
                 result2 = response2.json()
                 return result2["choices"][0]["message"]["content"]
@@ -563,8 +801,26 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                 
                 logger.info(f"Executing function: {function_name} with args: {function_args}")
                 
-                # Execute the function (pass original message for semantic matching)
-                execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                # If listing lights for control purposes, also check switch domain
+                # Many light switches are in the switch domain, not light domain
+                if function_name == "list_available_entities" and function_args.get("domain") == "light":
+                    message_lower = message.lower() if message else ""
+                    # If this is for controlling lights (not just listing), check both domains
+                    if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
+                        logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
+                        light_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                        switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
+                        # Combine results
+                        if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
+                            execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
+                        else:
+                            execution_result = light_result
+                    else:
+                        # Just listing, use single domain
+                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                else:
+                    # Execute the function (pass original message for semantic matching)
+                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
                 
                 logger.info(f"Function execution result: {execution_result}")
                 
@@ -574,25 +830,49 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                     return execution_result
                 
                 # Second call: Get natural language response about the action
-                response2 = await client.post(
-                    f"{settings.vllm_url}/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.vllm_api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": message},
-                            {"role": "assistant", "content": None, "function_call": function_call},
-                            {"role": "function", "name": function_name, "content": str(execution_result)},
-                            {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 50
-                    }
-                )
+                # For list queries, let the LLM respond naturally with the full list
+                # For action commands, provide a brief confirmation
+                if function_name == "list_available_entities":
+                    # Let LLM naturally format the list response
+                    response2 = await client.post(
+                        f"{settings.vllm_url}/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.vllm_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": message},
+                                {"role": "assistant", "content": None, "function_call": function_call},
+                                {"role": "function", "name": function_name, "content": str(execution_result)}
+                            ],
+                            "temperature": 0.3,
+                            "max_tokens": 200
+                        }
+                    )
+                else:
+                    # For action commands, brief confirmation
+                    response2 = await client.post(
+                        f"{settings.vllm_url}/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {settings.vllm_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": message},
+                                {"role": "assistant", "content": None, "function_call": function_call},
+                                {"role": "function", "name": function_name, "content": str(execution_result)},
+                                {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
+                            ],
+                            "temperature": 0.3,
+                            "max_tokens": 50
+                        }
+                    )
                 response2.raise_for_status()
                 result2 = response2.json()
                 return result2["choices"][0]["message"]["content"]
@@ -698,7 +978,23 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                                 function_args = function_args_str
                             
                             logger.info(f"Retry: Executing function: {function_name} with args: {function_args}")
-                            execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                            
+                            # If listing lights for control purposes, also check switch domain
+                            if function_name == "list_available_entities" and function_args.get("domain") == "light":
+                                message_lower = message.lower() if message else ""
+                                if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
+                                    logger.info("Retry: User wants to control lights - checking both 'light' and 'switch' domains")
+                                    light_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                                    switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
+                                    if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
+                                        execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
+                                    else:
+                                        execution_result = light_result
+                                else:
+                                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                            else:
+                                execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
+                            
                             logger.info(f"Retry: Function execution result: {execution_result}")
                             
                             # Check if execution result is an error - if so, return it directly
@@ -706,11 +1002,33 @@ async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> st
                                 logger.warning(f"Retry function execution returned error: {execution_result}")
                                 return execution_result
                             
-                            # For list queries, return directly; for actions, get natural language response
+                            # For list queries, let LLM format naturally; for actions, get brief confirmation
                             if function_name == "list_available_entities":
-                                return execution_result
+                                # Let LLM naturally format the list response
+                                response2 = await client.post(
+                                    f"{settings.vllm_url}/v1/chat/completions",
+                                    headers={
+                                        "Authorization": f"Bearer {settings.vllm_api_key}",
+                                        "Content-Type": "application/json"
+                                    },
+                                    json={
+                                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                                        "messages": [
+                                            {"role": "system", "content": system_prompt},
+                                            {"role": "user", "content": message},
+                                            {"role": "assistant", "content": None, "tool_calls": retry_tool_calls},
+                                            {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]}
+                                        ],
+                                        "tools": tools,
+                                        "temperature": 0.3,
+                                        "max_tokens": 200
+                                    }
+                                )
+                                response2.raise_for_status()
+                                result2 = response2.json()
+                                return result2["choices"][0]["message"]["content"]
                             else:
-                                # Get natural language response
+                                # Get natural language response for actions
                                 response2 = await client.post(
                                     f"{settings.vllm_url}/v1/chat/completions",
                                     headers={
@@ -793,12 +1111,116 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
             
             elif function_name == "add_item_to_shopping_list":
                 item_name = args.get("item_name", "")
-                result = await ha_client.call_service(
-                    "shopping_list",
-                    "add_item",
-                    name=item_name
-                )
-                return f"Added {item_name} to shopping list"
+                if not item_name:
+                    return "Error: No item name provided"
+                
+                # Use todo.add_item service with the Google Keep shopping list entity
+                entity_id = "todo.google_keep_shopping"
+                logger.info(f"Calling todo.add_item service with entity_id='{entity_id}', item='{item_name}'")
+                try:
+                    result = await ha_client.call_service(
+                        "todo",
+                        "add_item",
+                        entity_id=entity_id,
+                        item=item_name
+                    )
+                    logger.info(f"todo.add_item service call result: {result}")
+                    
+                    # Check if result indicates success
+                    if isinstance(result, list):
+                        # Service call succeeded
+                        logger.info(f"Service call completed. Item '{item_name}' should be added to shopping list.")
+                        return f"Added {item_name} to shopping list"
+                    elif isinstance(result, dict):
+                        # Check for error status
+                        if result.get("status") == "error" or "error" in result:
+                            logger.error(f"Error response from todo.add_item: {result}")
+                            return f"Error: Failed to add {item_name} to shopping list. Response: {result}"
+                        else:
+                            return f"Added {item_name} to shopping list"
+                    else:
+                        logger.warning(f"Unexpected result type from todo.add_item: {type(result)}, value: {result}")
+                        return f"Added {item_name} to shopping list"
+                        
+                except Exception as e:
+                    # Check if it's an HTTP error
+                    error_str = str(e)
+                    if "404" in error_str or "Not Found" in error_str:
+                        logger.error(f"Service not found: {e}")
+                        return f"Error: todo.add_item service not found or entity '{entity_id}' not available. Please check Home Assistant configuration."
+                    elif "401" in error_str or "Unauthorized" in error_str:
+                        logger.error(f"Authentication error: {e}")
+                        return f"Error: Authentication failed when calling Home Assistant service."
+                    else:
+                        logger.error(f"Exception calling todo.add_item: {e}", exc_info=True)
+                        return f"Error: Failed to add {item_name} to shopping list: {str(e)}"
+            
+            elif function_name == "get_shopping_list_items":
+                # Get the shopping list entity state to retrieve items
+                entity_id = "todo.google_keep_shopping"
+                logger.info(f"Getting shopping list items from entity '{entity_id}'")
+                try:
+                    entity = await ha_client.get_entity(entity_id)
+                    state_value = entity.get('state', 'unknown')
+                    logger.info(f"Entity state retrieved: {state_value}")
+                    
+                    # Extract items from entity attributes
+                    attributes = entity.get("attributes", {})
+                    
+                    # Try different possible locations for items
+                    items = attributes.get("items", [])
+                    if not items:
+                        # Try alternative attribute names
+                        items = attributes.get("todo_items", [])
+                    if not items:
+                        items = attributes.get("list_items", [])
+                    
+                    # Log what we found for debugging
+                    logger.info(f"Attributes keys: {list(attributes.keys())}")
+                    logger.info(f"Found {len(items)} items in attributes")
+                    
+                    if not items:
+                        # If no items found but state shows a count, log the full structure for debugging
+                        if state_value and str(state_value).isdigit() and int(state_value) > 0:
+                            logger.warning(f"State shows {state_value} items but items list is empty.")
+                            logger.info(f"Full entity structure: {json.dumps(entity, indent=2)}")
+                            # Try to find items in any nested structure
+                            # Sometimes items might be in a different format
+                            for key, value in attributes.items():
+                                if isinstance(value, list) and len(value) > 0:
+                                    logger.info(f"Found list in attribute '{key}' with {len(value)} items: {value[:2]}")
+                                    # Check if this looks like items
+                                    if isinstance(value[0], dict) and any(field in value[0] for field in ['summary', 'name', 'item', 'uid']):
+                                        items = value
+                                        logger.info(f"Using items from attribute '{key}'")
+                                        break
+                    
+                    if not items:
+                        return "The shopping list is empty."
+                    
+                    # Format items for response
+                    # Items are typically dicts with 'summary' or 'name' field
+                    item_list = []
+                    for item in items:
+                        if isinstance(item, dict):
+                            # Try different possible field names
+                            item_name = item.get("summary") or item.get("name") or item.get("item") or item.get("uid") or str(item)
+                        else:
+                            item_name = str(item)
+                        item_list.append(item_name)
+                    
+                    item_count = len(item_list)
+                    items_text = "\n".join(f"- {item}" for item in item_list)
+                    
+                    return f"Shopping list has {item_count} item{'s' if item_count != 1 else ''}:\n{items_text}"
+                    
+                except Exception as e:
+                    logger.error(f"Exception getting shopping list items: {e}", exc_info=True)
+                    error_str = str(e)
+                    if "404" in error_str or "Not Found" in error_str:
+                        return f"Error: Shopping list entity '{entity_id}' not found. Please check Home Assistant configuration."
+                    else:
+                        return f"Error: Failed to get shopping list items: {str(e)}"
             
             elif function_name == "start_timer":
                 duration_minutes = args.get("duration_minutes", 0)
@@ -849,6 +1271,22 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                 
                 logger.info(f"Executing {function_name} with entity_id: '{entity_id}'")
                 
+                # Check if this looks like a guessed/constructed entity_id
+                # If the original message contains natural language that matches the entity_id pattern,
+                # it's likely a guess and we should reject it
+                if original_message:
+                    message_lower = original_message.lower()
+                    # Extract the descriptive part from entity_id (e.g., "den_lights" from "light.den_lights")
+                    if "." in entity_id:
+                        entity_desc = entity_id.split(".", 1)[1].replace("_", " ").lower()
+                        # If the entity description appears in the original message, it might be a guess
+                        # But we need to be careful - if it's an exact match from list_available_entities, that's fine
+                        # The real issue is when the LLM constructs entity_ids without calling list_available_entities first
+                        # We'll check if the entity exists first, and if not, we'll do semantic matching
+                        # But we should log a warning if it looks like a guess
+                        if entity_desc in message_lower and not any(word in message_lower for word in ["list", "show", "what", "available", "entities"]):
+                            logger.warning(f"Entity_id '{entity_id}' looks like it might be guessed from message '{original_message}'. Will verify it exists first.")
+                
                 # First, try to verify the entity exists
                 entity_exists = False
                 try:
@@ -883,12 +1321,23 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                     
                     # If we have a likely domain, use semantic matching with all entities in that domain
                     # This is the preferred approach - get all entities in the domain and match semantically
+                    # For lights, also check the switch domain as many light switches are in the switch domain
                     if likely_domain:
-                        logger.info(f"Attempting semantic matching for '{search_term}' in domain '{likely_domain}'")
+                        # If user mentioned "light" or "lights", check both light and switch domains
+                        check_domains = [likely_domain]
+                        if likely_domain == "light" or (original_message and "light" in original_message.lower()):
+                            if "switch" not in check_domains:
+                                check_domains.append("switch")
+                            logger.info(f"User mentioned lights - will check both 'light' and 'switch' domains")
+                        
+                        logger.info(f"Attempting semantic matching for '{search_term}' in domains {check_domains}")
                         try:
-                            # Get all entities in the domain
+                            # Get all entities in the relevant domains
                             all_entities = await ha_client.get_entities()
-                            domain_entities = [e for e in all_entities if e["entity_id"].startswith(f"{likely_domain}.")]
+                            domain_entities = []
+                            for domain_to_check in check_domains:
+                                domain_entities.extend([e for e in all_entities if e["entity_id"].startswith(f"{domain_to_check}.")])
+                            
                             # Filter out dummy entities
                             domain_entities = _filter_dummy_entities(domain_entities)
                             
@@ -901,6 +1350,7 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                     entity_list.append(f"{entity_id_val} ({friendly_name})")
                                 
                                 entity_list_str = "\n".join(entity_list)
+                                domains_str = " and ".join(check_domains)
                                 
                                 async with httpx.AsyncClient(timeout=10.0) as llm_client:
                                     match_response = await llm_client.post(
@@ -913,7 +1363,7 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                             "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
                                             "messages": [
                                                 {"role": "system", "content": "You match user descriptions to Home Assistant entities using semantic understanding. Match based on meaning: vehicle names/brands match 'car', room names match locations, device types match functions. Return ONLY the exact entity_id that best matches, nothing else."},
-                                                {"role": "user", "content": f"User said: '{original_message if original_message else search_term}'\n\nAvailable {likely_domain} entities:\n{entity_list_str}\n\nWhich entity_id semantically matches what the user wants to control? Use semantic understanding - for example, 'car' matches vehicle names like 'rav4', 'toyota', etc. Return only the entity_id."}
+                                                {"role": "user", "content": f"User said: '{original_message if original_message else search_term}'\n\nAvailable {domains_str} entities:\n{entity_list_str}\n\nWhich entity_id semantically matches what the user wants to control? Use semantic understanding - for example, 'car' matches vehicle names like 'rav4', 'toyota', etc., 'den lights' matches entities with 'den' in the name. Return only the entity_id."}
                                             ],
                                             "temperature": 0.1,
                                             "max_tokens": 100
@@ -934,20 +1384,21 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                     candidate_ids = [e.get("entity_id", "") for e in domain_entities]
                                     if matched_entity_id in candidate_ids:
                                         entity_id = matched_entity_id
-                                        domain = likely_domain
-                                        logger.info(f"Semantically matched '{search_term}' to entity_id '{entity_id}' in domain '{likely_domain}'")
+                                        # Extract domain from matched entity_id
+                                        domain = matched_entity_id.split(".")[0] if "." in matched_entity_id else likely_domain
+                                        logger.info(f"Semantically matched '{search_term}' to entity_id '{entity_id}' in domain '{domain}'")
                                         resolved = True
                                     else:
                                         logger.warning(f"LLM returned entity_id not in candidates: {matched_entity_id}. Candidates: {candidate_ids[:3]}")
                                         # If semantic matching returned invalid entity, don't fall back to literal search
                                         # Return error instead
-                                        error_msg = f"Error: Semantic matching failed to find valid {likely_domain} entity matching '{original_message if original_message else search_term}'"
+                                        error_msg = f"Error: Semantic matching failed to find valid {domains_str} entity matching '{original_message if original_message else search_term}'"
                                         logger.warning(error_msg)
                                         return error_msg
                         except Exception as e:
                             logger.error(f"Error in semantic entity matching: {e}", exc_info=True)
                             # If semantic matching fails with a known domain, return error instead of falling back
-                            error_msg = f"Error: Could not semantically match '{original_message if original_message else search_term}' to a {likely_domain} entity: {str(e)}"
+                            error_msg = f"Error: Could not semantically match '{original_message if original_message else search_term}' to a {check_domains} entity: {str(e)}"
                             return error_msg
                     
                     # Only fallback to literal search if semantic matching didn't work AND we have a domain
@@ -1160,10 +1611,23 @@ async def _handle_googling(message: str) -> str:
         search_context = search_service.format_search_context(search_results)
         
         # Load googling system prompt
-        try:
-            with open("/opt/llm/prompts/googling_system.txt", "r") as f:
-                system_prompt = f.read()
-        except Exception:
+        # Try /app/prompts/ first (Docker container path), then /opt/llm/prompts/ (host path)
+        prompt_paths = [
+            "/app/prompts/googling_system.txt",
+            "/opt/llm/prompts/googling_system.txt"
+        ]
+        system_prompt = None
+        for prompt_path in prompt_paths:
+            try:
+                with open(prompt_path, "r") as f:
+                    system_prompt = f.read()
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        
+        if system_prompt is None:
             system_prompt = "You are a helpful assistant that answers factual questions using web search results. Provide concise, direct answers."
         
         # Call LLM with search context

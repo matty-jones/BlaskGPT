@@ -41,7 +41,7 @@ HA_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "add_item_to_shopping_list",
-            "description": "Add an item to the Home Assistant shopping list",
+            "description": "Add an item to the Home Assistant shopping list. Use this when the user explicitly wants to ADD an item to the list.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -51,6 +51,18 @@ HA_FUNCTIONS = [
                     }
                 },
                 "required": ["item_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_shopping_list_items",
+            "description": "Get the current items on the shopping list. Use this when the user asks about the shopping list (e.g., 'what's on my shopping list?', 'how many items?', 'is X on the list?', 'show me the shopping list'). This function returns all items currently on the list. This function takes no parameters.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
             }
         }
     },
@@ -153,6 +165,7 @@ HA_FUNCTIONS = [
 FUNCTION_HANDLERS = {
     "play_media_on_speakers": "handle_play_media",
     "add_item_to_shopping_list": "handle_add_shopping_item",
+    "get_shopping_list_items": "handle_get_shopping_list_items",
     "start_timer": "handle_start_timer",
     "get_entity_state": "handle_get_entity_state",
     "list_available_entities": "handle_list_entities",
