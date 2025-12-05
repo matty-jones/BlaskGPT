@@ -1156,55 +1156,47 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                         return f"Error: Failed to add {item_name} to shopping list: {str(e)}"
             
             elif function_name == "get_shopping_list_items":
-                # Get the shopping list entity state to retrieve items
+                # Use todo.get_items service to retrieve items from the shopping list
                 entity_id = "todo.google_keep_shopping"
-                logger.info(f"Getting shopping list items from entity '{entity_id}'")
+                logger.info(f"Getting shopping list items from entity '{entity_id}' using todo.get_items service")
                 try:
-                    entity = await ha_client.get_entity(entity_id)
-                    state_value = entity.get('state', 'unknown')
-                    logger.info(f"Entity state retrieved: {state_value}")
+                    # Call todo.get_items service with return_response=true
+                    # Use entity_id directly (not in target), and filter for needs_action items only
+                    service_data = {
+                        "entity_id": entity_id,
+                        "status": ["needs_action"]  # Only get incomplete items for shopping list
+                    }
+                    logger.info(f"Calling todo.get_items with data: {json.dumps(service_data)}")
                     
-                    # Extract items from entity attributes
-                    attributes = entity.get("attributes", {})
+                    result = await ha_client.call_service(
+                        "todo",
+                        "get_items",
+                        return_response=True,  # Required for services that return data
+                        **service_data
+                    )
+                    logger.info(f"todo.get_items service call result type: {type(result)}")
+                    logger.debug(f"todo.get_items service call result: {json.dumps(result, indent=2)}")
                     
-                    # Try different possible locations for items
-                    items = attributes.get("items", [])
-                    if not items:
-                        # Try alternative attribute names
-                        items = attributes.get("todo_items", [])
-                    if not items:
-                        items = attributes.get("list_items", [])
-                    
-                    # Log what we found for debugging
-                    logger.info(f"Attributes keys: {list(attributes.keys())}")
-                    logger.info(f"Found {len(items)} items in attributes")
-                    
-                    if not items:
-                        # If no items found but state shows a count, log the full structure for debugging
-                        if state_value and str(state_value).isdigit() and int(state_value) > 0:
-                            logger.warning(f"State shows {state_value} items but items list is empty.")
-                            logger.info(f"Full entity structure: {json.dumps(entity, indent=2)}")
-                            # Try to find items in any nested structure
-                            # Sometimes items might be in a different format
-                            for key, value in attributes.items():
-                                if isinstance(value, list) and len(value) > 0:
-                                    logger.info(f"Found list in attribute '{key}' with {len(value)} items: {value[:2]}")
-                                    # Check if this looks like items
-                                    if isinstance(value[0], dict) and any(field in value[0] for field in ['summary', 'name', 'item', 'uid']):
-                                        items = value
-                                        logger.info(f"Using items from attribute '{key}'")
-                                        break
+                    # Parse response: response_json["service_response"]["todo.google_keep_shopping"]["items"]
+                    items = []
+                    if isinstance(result, dict):
+                        service_response = result.get("service_response", {})
+                        if entity_id in service_response:
+                            entity_data = service_response[entity_id]
+                            if isinstance(entity_data, dict) and "items" in entity_data:
+                                items = entity_data["items"]
+                                logger.info(f"Found {len(items)} items in service response")
                     
                     if not items:
                         return "The shopping list is empty."
                     
                     # Format items for response
-                    # Items are typically dicts with 'summary' or 'name' field
+                    # Items are dicts with 'summary', 'uid', and 'status' fields
                     item_list = []
                     for item in items:
                         if isinstance(item, dict):
-                            # Try different possible field names
-                            item_name = item.get("summary") or item.get("name") or item.get("item") or item.get("uid") or str(item)
+                            # Extract the summary (item name)
+                            item_name = item.get("summary") or item.get("name") or item.get("item") or str(item)
                         else:
                             item_name = str(item)
                         item_list.append(item_name)
@@ -1212,7 +1204,8 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                     item_count = len(item_list)
                     items_text = "\n".join(f"- {item}" for item in item_list)
                     
-                    return f"Shopping list has {item_count} item{'s' if item_count != 1 else ''}:\n{items_text}"
+                    # Return format that emphasizes the full list
+                    return f"Shopping list ({item_count} item{'s' if item_count != 1 else ''}):\n{items_text}"
                     
                 except Exception as e:
                     logger.error(f"Exception getting shopping list items: {e}", exc_info=True)

@@ -55,6 +55,13 @@ class HomeAssistantClient:
             async with self._session.request(
                 method, url, headers=self.headers, **kwargs
             ) as response:
+                if response.status >= 400:
+                    # Log error response body for debugging
+                    try:
+                        error_body = await response.text()
+                        logger.error(f"HA API request failed {response.status}: {error_body[:500]}")
+                    except:
+                        pass
                 response.raise_for_status()
                 if response.content_type == 'application/json':
                     return await response.json()
@@ -80,6 +87,7 @@ class HomeAssistantClient:
         domain: str,
         service: str,
         entity_id: Optional[str] = None,
+        return_response: bool = False,
         **service_data
     ) -> List[Dict[str, Any]]:
         """
@@ -89,15 +97,20 @@ class HomeAssistantClient:
             domain: Service domain (e.g., 'media_player', 'shopping_list')
             service: Service name (e.g., 'play_media', 'add_item')
             entity_id: Optional entity ID to target
+            return_response: If True, add ?return_response=true to URL (for services that return data)
             **service_data: Additional service data
         """
         data = service_data.copy()
         if entity_id:
             data["entity_id"] = entity_id
         
+        endpoint = f"services/{domain}/{service}"
+        if return_response:
+            endpoint += "?return_response=true"
+        
         return await self._request(
             "POST",
-            f"services/{domain}/{service}",
+            endpoint,
             json=data
         )
     

@@ -58,7 +58,7 @@ HA_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "get_shopping_list_items",
-            "description": "Get the current items on the shopping list. Use this when the user asks about the shopping list (e.g., 'what's on my shopping list?', 'how many items?', 'is X on the list?', 'show me the shopping list'). This function returns all items currently on the list. This function takes no parameters.",
+            "description": "Get the current items on the shopping list. Use this when the user asks about the shopping list (e.g., 'what's on my shopping list?', 'how many items?', 'is X on the list?', 'show me the shopping list', 'read me the items'). IMPORTANT: When the user asks 'what is on' or 'read me' or 'show me' the shopping list, you MUST return the FULL LIST of items, not just the count. The function returns all items with their names - present them all to the user. This function takes no parameters.",
             "parameters": {
                 "type": "object",
                 "properties": {},
