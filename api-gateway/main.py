@@ -1085,7 +1085,123 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
     """Execute a Home Assistant function"""
     try:
         async with ha_client:
-            if function_name == "play_media_on_speakers":
+            if function_name == "search_music":
+                query = args.get("query", "")
+                media_type = args.get("media_type", "any")
+                limit = args.get("limit", 10)
+                
+                if not query:
+                    return "Error: No search query provided"
+                
+                try:
+                    # Find a Music Assistant media player entity to get config_entry_id
+                    speakers = await ha_client.find_speakers()
+                    speakers = _filter_dummy_entities(speakers)
+                    
+                    if not speakers:
+                        return "Error: No media player entities found. Please ensure Music Assistant is configured."
+                    
+                    # Get config_entry_id from the first Music Assistant entity
+                    # We need to get it from the device registry via the entity's device_id
+                    ma_entity = speakers[0]["entity_id"]
+                    config_entry_id = None
+                    
+                    try:
+                        # Get entity state to find device_id
+                        entity_state = await ha_client.get_entity(ma_entity)
+                        device_id = entity_state.get("attributes", {}).get("device_id")
+                        
+                        if device_id:
+                            # Get device info from device registry
+                            try:
+                                device_info = await ha_client._request("GET", f"config/device_registry/{device_id}")
+                                # Get config_entries from device
+                                config_entries = device_info.get("config_entries", [])
+                                if config_entries:
+                                    # Get the first config entry (usually Music Assistant)
+                                    config_entry_id = config_entries[0]
+                                    logger.info(f"Found config_entry_id: {config_entry_id} for entity {ma_entity}")
+                            except Exception as e:
+                                logger.warning(f"Could not get config_entry_id from device registry: {e}")
+                    except Exception as e:
+                        logger.warning(f"Could not get device_id from entity {ma_entity}: {e}")
+                    
+                    if not config_entry_id:
+                        return "Error: Could not find Music Assistant config_entry_id. Please ensure Music Assistant is properly configured and the entity is associated with a Music Assistant device."
+                    
+                    # Call music_assistant.search service
+                    # Required: config_entry_id (or try without it), name (the search query)
+                    search_data = {
+                        "name": query  # The search query goes in 'name' parameter
+                    }
+                    
+                    # Add config_entry_id if we found it
+                    if config_entry_id:
+                        search_data["config_entry_id"] = config_entry_id
+                    
+                    # Add optional parameters if provided
+                    if media_type and media_type != "any":
+                        search_data["media_type"] = media_type
+                    if limit:
+                        search_data["limit"] = limit
+                    
+                    result = await ha_client.call_service(
+                        "music_assistant",
+                        "search",
+                        return_response=True,
+                        **search_data
+                    )
+                    
+                    # Parse search response
+                    # Response structure may vary, but typically contains items with uri, name, etc.
+                    items = []
+                    if isinstance(result, dict):
+                        service_response = result.get("service_response", {})
+                        if isinstance(service_response, dict):
+                            # Check for items in various possible locations
+                            items = service_response.get("items", service_response.get("results", []))
+                        elif isinstance(service_response, list):
+                            items = service_response
+                    elif isinstance(result, list):
+                        items = result
+                    
+                    if not items:
+                        return f"No music found for query: {query}. Try a different search term or check that Music Assistant has music available."
+                    
+                    # Format results for the LLM
+                    formatted_results = []
+                    for item in items[:limit]:
+                        if isinstance(item, dict):
+                            # Music Assistant search results typically have uri, name, artist, etc.
+                            uri = item.get("uri", item.get("media_content_id", ""))
+                            name = item.get("name", item.get("title", "Unknown"))
+                            artist = item.get("artist", item.get("artist_name", ""))
+                            item_type = item.get("media_type", item.get("type", "music"))
+                            
+                            if artist:
+                                display_name = f"{name} by {artist}"
+                            else:
+                                display_name = name
+                            
+                            formatted_results.append(f"{display_name} ({item_type}) - URI: {uri}")
+                        else:
+                            formatted_results.append(str(item))
+                    
+                    result_text = f"Found {len(items)} result(s) for '{query}':\n" + "\n".join(formatted_results)
+                    return result_text
+                    
+                except Exception as e:
+                    logger.error(f"Error searching music: {e}", exc_info=True)
+                    error_str = str(e)
+                    
+                    if "400" in error_str or "Bad Request" in error_str:
+                        return f"Error: Music Assistant search returned 400 Bad Request. Check that config_entry_id is correct and 'name' parameter is provided. Error: {str(e)}"
+                    elif "404" in error_str or "Not Found" in error_str:
+                        return f"Error: Music Assistant search service not found (404). Please check that Music Assistant is installed and configured in Home Assistant."
+                    else:
+                        return f"Error searching for music: {str(e)}"
+            
+            elif function_name == "play_media_on_speakers":
                 entity_names = args.get("entity_names", [])
                 media_content_id = args.get("media_content_id", "")
                 media_content_type = args.get("media_content_type", "music")
