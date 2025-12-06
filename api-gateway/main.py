@@ -1097,8 +1097,30 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                     speakers = _filter_dummy_entities(speakers)
                     entity_ids = [s["entity_id"] for s in speakers]
                 else:
-                    # Map entity names to IDs (simplified - would need proper mapping)
-                    entity_ids = entity_names
+                    # Validate that all entity IDs exist before proceeding
+                    entity_ids = []
+                    invalid_entities = []
+                    
+                    for entity_name in entity_names:
+                        # Check if it looks like an entity_id (has a dot) or is just a name
+                        if "." in entity_name:
+                            # It's an entity_id, verify it exists
+                            try:
+                                entity_state = await ha_client.get_entity(entity_name)
+                                entity_ids.append(entity_name)
+                            except Exception as e:
+                                logger.warning(f"Entity {entity_name} not found: {e}")
+                                invalid_entities.append(entity_name)
+                        else:
+                            # It's not a proper entity_id format - this shouldn't happen if LLM followed instructions
+                            invalid_entities.append(entity_name)
+                    
+                    # If any entities are invalid, return an error that prompts the LLM to search
+                    if invalid_entities:
+                        return f"Error: The following speaker entities were not found: {', '.join(invalid_entities)}. You must first call list_available_entities with domain='media_player' to get the exact entity_id from Home Assistant. Do not guess or construct entity_ids."
+                
+                if not entity_ids:
+                    return "Error: No valid speaker entities found. You must first call list_available_entities with domain='media_player' to get available speakers."
                 
                 result = await ha_client.call_service(
                     "media_player",

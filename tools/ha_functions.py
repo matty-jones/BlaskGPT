@@ -13,14 +13,14 @@ HA_FUNCTIONS = [
         "type": "function",
         "function": {
             "name": "play_media_on_speakers",
-            "description": "Play media (music, podcast, etc.) on one or more speakers. Use 'all' or 'all speakers' to target all available speakers.",
+            "description": "Play media (music, podcast, etc.) on one or more speakers. Use 'all' or 'all speakers' to target all available speakers. CRITICAL: You MUST first call list_available_entities with domain='media_player' to find the exact entity_id if the user provides a natural language name (e.g., 'den wifi', 'living room speaker'). Do NOT guess or construct entity_ids like 'media_player.den_wifi' - you must search for the actual entity_id first. After getting the list, use semantic understanding to match the user's description to the entity from the list (e.g., 'den wifi' matches 'media_player.den_wifi', 'dead wifi' might match 'den wifi' if that's the closest match).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "entity_names": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of speaker entity names or IDs. Use 'all' to target all speakers."
+                        "description": "List of exact speaker entity IDs from Home Assistant (e.g., 'media_player.den_wifi'). Must be obtained from list_available_entities first if user provides a natural language name. Use 'all' to target all speakers."
                     },
                     "media_content_id": {
                         "type": "string",
