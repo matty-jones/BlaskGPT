@@ -185,6 +185,18 @@ HA_FUNCTIONS = [
                 "required": ["entity_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_phone_blasxel_6",
+            "description": "Trigger the Home Assistant script that repeatedly rings the Blasxel 6 via the alarm_stream until the device is unlocked, then restores the original volume.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -199,7 +211,8 @@ FUNCTION_HANDLERS = {
     "get_entity_state": "handle_get_entity_state",
     "list_available_entities": "handle_list_entities",
     "turn_on_entity": "handle_turn_on",
-    "turn_off_entity": "handle_turn_off"
+    "turn_off_entity": "handle_turn_off",
+    "find_phone_blasxel_6": "handle_find_phone_blasxel_6"
 }
 
 

@@ -345,10 +345,17 @@ async def _detect_use_case(message: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             classification_prompt = """Classify the user's message into one of these use cases:
-- "ha_command": Commands to control Home Assistant devices (lights, switches, locks, speakers, timers, shopping list, etc.) or questions about Home Assistant entities/devices
-- "googling": Factual questions that require web search (e.g., "What is the capital of France?", "How does photosynthesis work?")
+- "ha_command": Commands to control Home Assistant devices (lights, switches, locks, speakers, timers, shopping list, etc.) or questions about Home Assistant entities/devices. This includes action commands like "find my phone", "ring my phone", "turn on lights", "play music", "add to shopping list", "start timer", "lock the door", etc. Even if phrased as a question, if it's about controlling or interacting with devices, it's ha_command.
+- "googling": Factual questions that require web search and are NOT about controlling devices (e.g., "What is the capital of France?", "How does photosynthesis work?", "What is the speed of light?")
 - "automation_variation": Requests to generate variations of automation phrases
 - "general": General conversation, greetings, or other non-specific requests
+
+Examples:
+- "find my phone" → ha_command (device control)
+- "ring my phone" → ha_command (device control)
+- "what is the capital of France?" → googling (factual question)
+- "turn on the lights" → ha_command (device control)
+- "how do I find my phone?" → ha_command (asking how to control a device, not a factual question)
 
 Respond with ONLY the use case name (one word), nothing else."""
             
@@ -393,16 +400,22 @@ def _detect_use_case_fallback(message: str) -> str:
     """
     message_lower = message.lower()
     
-    # Home Assistant commands
+    # Home Assistant commands - check these first
     ha_keywords = ["shuffle", "play", "add", "set", "timer", "lock", "locks", "unlock", 
                    "turn on", "turn off", "shopping list", "speaker", "speakers",
-                   "what", "list", "show", "entities", "devices"]
+                   "find my", "find the", "ring my", "ring the", "locate my", "locate the",
+                   "list", "show", "entities", "devices"]
     if any(keyword in message_lower for keyword in ha_keywords):
         return "ha_command"
     
-    # Googling queries
+    # Googling queries - but exclude device control questions
     question_words = ["what", "who", "where", "when", "why", "how", "can", "is", "are"]
+    device_control_indicators = ["my phone", "my device", "the lights", "the lock", "the speaker", 
+                                  "my lock", "my lights", "my speaker", "my timer", "my shopping"]
     if any(message_lower.startswith(word) for word in question_words):
+        # If it's a question but contains device control indicators, it's likely ha_command
+        if any(indicator in message_lower for indicator in device_control_indicators):
+            return "ha_command"
         return "googling"
     
     # Default to general chat
@@ -1373,6 +1386,13 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                 entity_id = args.get("entity_id", "")
                 entity = await ha_client.get_entity(entity_id)
                 return f"Entity {entity_id} state: {entity.get('state', 'unknown')}"
+            
+            elif function_name == "find_phone_blasxel_6":
+                result = await ha_client.call_service(
+                    "script",
+                    "find_phone_blasxel_6"
+                )
+                return "Started find phone script for Blasxel 6"
             
             elif function_name == "list_available_entities":
                 domain = args.get("domain")

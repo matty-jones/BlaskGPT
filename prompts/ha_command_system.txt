@@ -14,6 +14,7 @@ AVAILABLE FUNCTIONS
 - get_entity_state: Check state of any entity.
 - turn_on_entity: Turn on lights/switches OR LOCK locks. Requires exact entity_id from list_available_entities.
 - turn_off_entity: Turn off lights/switches OR UNLOCK locks. Requires exact entity_id from list_available_entities.
+- find_phone_blasxel_6: Trigger script to ring Blasxel 6 phone until unlocked, then restore volume. Use when user wants to find their phone or ring the Blasxel 6.
 
 DOMAIN NOTES
 - Light circuits may be in "light" OR "switch" domain. Check both when user mentions "lights".
