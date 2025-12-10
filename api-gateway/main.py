@@ -23,10 +23,16 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 import httpx
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add parent and current directory to path for imports
+current_dir = Path(__file__).parent
+sys.path.insert(0, str(current_dir.parent))
+sys.path.insert(0, str(current_dir))
 
-from tools.ha_functions import get_function_schemas
+from ha_executor import (
+    handle_ha_command as execute_ha_command,
+    start_entity_cache_refresher,
+    stop_entity_cache_refresher,
+)
 
 # Import from hyphenated directory names using importlib
 import importlib.util
@@ -64,6 +70,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _minutes_to_hhmmss(minutes: int) -> str:
+    """Convert minutes to HH:MM:SS format for Home Assistant timer scripts."""
+    total_seconds = minutes * 60
+    hours = total_seconds // 3600
+    minutes_remaining = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes_remaining:02d}:{seconds:02d}"
 
 
 class Settings(BaseSettings):
@@ -177,12 +192,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error initializing HA client: {e}")
         ha_client = None
-    
+
+    # Start background entity cache refresher
+    if ha_client:
+        try:
+            await start_entity_cache_refresher(ha_client)
+        except Exception as e:
+            logger.warning(f"Failed to start cache refresher: {e}")
+
     yield
     
     # Cleanup
-    if ha_client and ha_client._session:
-        await ha_client._session.close()
+    if ha_client:
+        try:
+            await stop_entity_cache_refresher()
+        except Exception as e:
+            logger.warning(f"Error stopping cache refresher: {e}")
+        if ha_client._session:
+            await ha_client._session.close()
     logger.info("Shutting down API Gateway...")
 
 
@@ -249,7 +276,7 @@ async def chat_completions(request: ChatCompletionRequest):
         
         # Route to appropriate handler
         if use_case == "ha_command":
-            response_text = await _handle_ha_command(user_message, None)
+            response_text = await execute_ha_command(user_message, ha_client, settings)
         elif use_case == "googling":
             response_text = await _handle_googling(user_message)
         elif use_case == "automation_variation":
@@ -423,653 +450,12 @@ def _detect_use_case_fallback(message: str) -> str:
 
 
 async def _handle_ha_command(message: str, context: Optional[Dict] = None) -> str:
-    """
-    Handle Home Assistant command requests with function calling
-    """
+    """Compat wrapper delegating to the new HA executor module."""
     if not ha_client:
         return "Home Assistant client is not available. Please check the connection."
-    
+
     try:
-        # Load HA command system prompt
-        # Try /app/prompts/ first (Docker container path), then /opt/llm/prompts/ (host path)
-        prompt_paths = [
-            "/app/prompts/ha_command_system.txt",
-            "/opt/llm/prompts/ha_command_system.txt"
-        ]
-        system_prompt = None
-        for prompt_path in prompt_paths:
-            try:
-                with open(prompt_path, "r") as f:
-                    system_prompt = f.read()
-                logger.info(f"Loaded HA command system prompt from {prompt_path} ({len(system_prompt)} characters)")
-                break
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                logger.warning(f"Failed to load HA command system prompt from {prompt_path}: {e}")
-                continue
-        
-        if system_prompt is None:
-            logger.error(f"Failed to load HA command system prompt from any path: {prompt_paths}")
-            system_prompt = "You are a helpful assistant that controls Home Assistant devices through natural language commands."
-        
-        # Get function schemas
-        functions = get_function_schemas()
-        
-        # First call: Get function call from LLM
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Convert functions to tools format (vLLM requires tools, not functions)
-            # vLLM may reject empty properties, so add a dummy property for functions with no params
-            import copy
-            tools = []
-            for func in functions:
-                func_copy = copy.deepcopy(func)
-                if "function" in func_copy and "parameters" in func_copy["function"]:
-                    params = func_copy["function"]["parameters"]
-                    # If properties is empty, vLLM may reject it - add a dummy property
-                    if isinstance(params, dict) and params.get("properties") == {}:
-                        # Add a dummy property that we'll ignore in the handler
-                        params["properties"] = {
-                            "_": {
-                                "type": "string",
-                                "description": "This function takes no parameters. Ignore this field."
-                            }
-                        }
-                tools.append(func_copy)
-            
-            request_payload = {
-                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": message}
-                ],
-                "tools": tools,  # Use tools instead of functions
-                "tool_choice": "auto",  # Use tool_choice instead of function_call
-                "temperature": 0.3,
-                "max_tokens": 200  # Reduced to fit within context limit (model max: 3072, input: ~2645)
-            }
-            
-            # Log the request for debugging (truncate tools to avoid huge logs)
-            logger.debug(f"Sending request to vLLM with {len(tools)} tools")
-            try:
-                response = await client.post(
-                    f"{settings.vllm_url}/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.vllm_api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json=request_payload
-                )
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                # Log the error response body for debugging
-                error_body = ""
-                try:
-                    error_body = e.response.text
-                    logger.error(f"vLLM returned {e.response.status_code}. Error body: {error_body[:500]}")
-                except:
-                    pass
-                raise
-            except httpx.HTTPStatusError as e:
-                # Log the error response body for debugging
-                error_body = ""
-                try:
-                    error_body = e.response.text
-                    logger.error(f"vLLM error response: {error_body}")
-                except:
-                    pass
-                raise
-            result = response.json()
-            message_obj = result["choices"][0]["message"]
-            
-            # Check if LLM wants to call a function (handle both formats)
-            tool_calls = message_obj.get("tool_calls")
-            function_call = message_obj.get("function_call")
-            content = message_obj.get("content", "")
-            
-            # Handle XML tool call format from qwen3_xml parser
-            import re
-            xml_tool_call_match = re.search(r'<tool_call>\s*({.*?})\s*</tool_call>', content, re.DOTALL)
-            if xml_tool_call_match:
-                try:
-                    tool_call_data = json.loads(xml_tool_call_match.group(1))
-                    function_name = tool_call_data.get("name")
-                    function_args = tool_call_data.get("arguments", {})
-                    logger.info(f"Found XML tool call: {function_name} with args {function_args}")
-                    
-                    # If listing lights for control purposes, also check switch domain
-                    # Many light switches are in the switch domain, not light domain
-                    if function_name == "list_available_entities" and function_args.get("domain") == "light":
-                        message_lower = message.lower() if message else ""
-                        # If this is for controlling lights (not just listing), check both domains
-                        if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
-                            logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
-                            light_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                            switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
-                            # Combine results
-                            if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
-                                execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
-                            else:
-                                execution_result = light_result
-                        else:
-                            # Just listing, use single domain
-                            execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                    else:
-                        # Execute the function (pass original message for semantic matching)
-                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                    
-                    logger.info(f"Function execution result: {execution_result}")
-                    
-                    # Check if execution result is an error - if so, return it directly
-                    if isinstance(execution_result, str) and (execution_result.startswith("Error:") or execution_result.startswith("Unknown function:")):
-                        logger.warning(f"Function execution returned error: {execution_result}")
-                        return execution_result
-                    
-                    # If list_available_entities was called with a query and found 0 results, 
-                    # automatically retry without query to get all entities for semantic matching
-                    if function_name == "list_available_entities" and "query" in function_args and "Found 0 entities" in str(execution_result):
-                        logger.info("list_available_entities with query returned 0 results, retrying without query for semantic matching")
-                        domain = function_args.get("domain")
-                        retry_args = {"domain": domain} if domain else {}
-                        execution_result = await _execute_ha_function("list_available_entities", retry_args, original_message=message)
-                        logger.info(f"Retry result: {execution_result}")
-                    
-                    # If searching for lights and found 0 results, also check switch domain
-                    # Many light switches are implemented as switches, not lights
-                    if function_name == "list_available_entities" and function_args.get("domain") == "light" and "Found 0 entities" in str(execution_result):
-                        logger.info("No entities found in 'light' domain, also checking 'switch' domain for light switches")
-                        switch_result = await _execute_ha_function("list_available_entities", {"domain": "switch"}, original_message=message)
-                        if "Found 0 entities" not in str(switch_result):
-                            # Combine results from both domains
-                            execution_result = f"Found in 'light' domain: {execution_result}\n\nFound in 'switch' domain (may include light switches): {switch_result}"
-                            logger.info(f"Combined result: {execution_result[:200]}")
-                        
-                        # Now let the LLM do semantic matching with the full list
-                        response2 = await client.post(
-                            f"{settings.vllm_url}/v1/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {settings.vllm_api_key}",
-                                "Content-Type": "application/json"
-                            },
-                            json={
-                                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": message},
-                                    {"role": "assistant", "content": content},
-                                    {"role": "tool", "name": "list_available_entities", "content": str(execution_result)},
-                                    {"role": "user", "content": f"From the list above, use semantic understanding to match the user's request to the correct entity. Then call the appropriate control function (turn_on_entity or turn_off_entity) with the exact entity_id."}
-                                ],
-                                "tools": tools,
-                                "tool_choice": "required",
-                                "temperature": 0.3,
-                                "max_tokens": 200
-                            }
-                        )
-                        response2.raise_for_status()
-                        result2 = response2.json()
-                        message_obj2 = result2["choices"][0]["message"]
-                        
-                        # Check if LLM made another function call
-                        tool_calls2 = message_obj2.get("tool_calls")
-                        if tool_calls2 and len(tool_calls2) > 0:
-                            tool_call2 = tool_calls2[0]
-                            function_name2 = tool_call2["function"]["name"]
-                            function_args_str2 = tool_call2["function"]["arguments"]
-                            if isinstance(function_args_str2, str):
-                                function_args2 = json.loads(function_args_str2)
-                            else:
-                                function_args2 = function_args_str2
-                            
-                            logger.info(f"LLM selected entity: {function_name2} with args: {function_args2}")
-                            execution_result2 = await _execute_ha_function(function_name2, function_args2, original_message=message)
-                            
-                            # Check if execution result is an error - if so, return it directly
-                            if isinstance(execution_result2, str) and (execution_result2.startswith("Error:") or execution_result2.startswith("Unknown function:")):
-                                logger.warning(f"Function execution returned error: {execution_result2}")
-                                return execution_result2
-                            
-                            # Final confirmation (this is always an action, so brief confirmation is appropriate)
-                            response3 = await client.post(
-                                f"{settings.vllm_url}/v1/chat/completions",
-                                headers={
-                                    "Authorization": f"Bearer {settings.vllm_api_key}",
-                                    "Content-Type": "application/json"
-                                },
-                                json={
-                                    "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                    "messages": [
-                                        {"role": "system", "content": system_prompt},
-                                        {"role": "user", "content": message},
-                                        {"role": "assistant", "content": None, "tool_calls": tool_calls2},
-                                        {"role": "tool", "name": function_name2, "content": str(execution_result2), "tool_call_id": tool_call2["id"]},
-                                        {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                                    ],
-                                    "tools": tools,
-                                    "temperature": 0.3,
-                                    "max_tokens": 50
-                                }
-                            )
-                            response3.raise_for_status()
-                            result3 = response3.json()
-                            return result3["choices"][0]["message"]["content"]
-                    
-                    # Second call: Get natural language response about the action
-                    # For list queries, let the LLM respond naturally with the full list
-                    # For action commands, provide a brief confirmation
-                    if function_name == "list_available_entities":
-                        # Let LLM naturally format the list response
-                        response2 = await client.post(
-                            f"{settings.vllm_url}/v1/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {settings.vllm_api_key}",
-                                "Content-Type": "application/json"
-                            },
-                            json={
-                                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": message},
-                                    {"role": "assistant", "content": content},
-                                    {"role": "tool", "name": function_name, "content": str(execution_result)}
-                                ],
-                                "tools": tools,
-                                "temperature": 0.3,
-                                "max_tokens": 200
-                            }
-                        )
-                    else:
-                        # For action commands, brief confirmation
-                        response2 = await client.post(
-                            f"{settings.vllm_url}/v1/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {settings.vllm_api_key}",
-                                "Content-Type": "application/json"
-                            },
-                            json={
-                                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": message},
-                                    {"role": "assistant", "content": content},
-                                    {"role": "tool", "name": function_name, "content": str(execution_result)},
-                                    {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                                ],
-                                "tools": tools,
-                                "temperature": 0.3,
-                                "max_tokens": 50
-                            }
-                        )
-                    response2.raise_for_status()
-                    result2 = response2.json()
-                    return result2["choices"][0]["message"]["content"]
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse XML tool call JSON: {e}")
-            
-            # Debug logging
-            logger.info(f"Response has tool_calls: {bool(tool_calls)}, function_call: {bool(function_call)}, content: {content[:100]}")
-            if tool_calls:
-                logger.info(f"Found tool_calls: {tool_calls}")
-            if function_call:
-                logger.info(f"Found function_call: {function_call}")
-            
-            if tool_calls and len(tool_calls) > 0:
-                # New format: tool_calls
-                tool_call = tool_calls[0]  # Get first tool call
-                function_name = tool_call["function"]["name"]
-                function_args_str = tool_call["function"]["arguments"]
-                if isinstance(function_args_str, str):
-                    function_args = json.loads(function_args_str)
-                else:
-                    function_args = function_args_str
-                
-                logger.info(f"Executing function: {function_name} with args: {function_args}")
-                
-                # If listing lights for control purposes, also check switch domain
-                # Many light switches are in the switch domain, not light domain
-                if function_name == "list_available_entities" and function_args.get("domain") == "light":
-                    message_lower = message.lower() if message else ""
-                    # If this is for controlling lights (not just listing), check both domains
-                    if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
-                        logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
-                        light_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                        switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
-                        # Combine results
-                        if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
-                            execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
-                        else:
-                            execution_result = light_result
-                    else:
-                        # Just listing, use single domain
-                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                else:
-                    # Execute the function (pass original message for semantic matching)
-                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                
-                logger.info(f"Function execution result: {execution_result}")
-                
-                # Check if execution result is an error - if so, return it directly
-                if isinstance(execution_result, str) and (execution_result.startswith("Error:") or execution_result.startswith("Unknown function:")):
-                    logger.warning(f"Function execution returned error: {execution_result}")
-                    return execution_result
-                
-                # Second call: Get natural language response about the action
-                # For list queries, let the LLM respond naturally with the full list
-                # For action commands, provide a brief confirmation
-                if function_name == "list_available_entities":
-                    # Let LLM naturally format the list response
-                    response2 = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": None, "tool_calls": tool_calls},
-                                {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]}
-                            ],
-                            "tools": tools,
-                            "temperature": 0.3,
-                            "max_tokens": 200
-                        }
-                    )
-                else:
-                    # For action commands, brief confirmation
-                    response2 = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": None, "tool_calls": tool_calls},
-                                {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]},
-                                {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                            ],
-                            "tools": tools,
-                            "temperature": 0.3,
-                            "max_tokens": 50
-                        }
-                    )
-                response2.raise_for_status()
-                result2 = response2.json()
-                return result2["choices"][0]["message"]["content"]
-            
-            elif function_call:
-                # Old format: function_call (for backwards compatibility)
-                function_name = function_call["name"]
-                function_args_str = function_call["arguments"]
-                if isinstance(function_args_str, str):
-                    function_args = json.loads(function_args_str)
-                else:
-                    function_args = function_args_str
-                
-                logger.info(f"Executing function: {function_name} with args: {function_args}")
-                
-                # If listing lights for control purposes, also check switch domain
-                # Many light switches are in the switch domain, not light domain
-                if function_name == "list_available_entities" and function_args.get("domain") == "light":
-                    message_lower = message.lower() if message else ""
-                    # If this is for controlling lights (not just listing), check both domains
-                    if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
-                        logger.info("User wants to control lights - checking both 'light' and 'switch' domains")
-                        light_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                        switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
-                        # Combine results
-                        if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
-                            execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
-                        else:
-                            execution_result = light_result
-                    else:
-                        # Just listing, use single domain
-                        execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                else:
-                    # Execute the function (pass original message for semantic matching)
-                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                
-                logger.info(f"Function execution result: {execution_result}")
-                
-                # Check if execution result is an error - if so, return it directly
-                if isinstance(execution_result, str) and (execution_result.startswith("Error:") or execution_result.startswith("Unknown function:")):
-                    logger.warning(f"Function execution returned error: {execution_result}")
-                    return execution_result
-                
-                # Second call: Get natural language response about the action
-                # For list queries, let the LLM respond naturally with the full list
-                # For action commands, provide a brief confirmation
-                if function_name == "list_available_entities":
-                    # Let LLM naturally format the list response
-                    response2 = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": None, "function_call": function_call},
-                                {"role": "function", "name": function_name, "content": str(execution_result)}
-                            ],
-                            "temperature": 0.3,
-                            "max_tokens": 200
-                        }
-                    )
-                else:
-                    # For action commands, brief confirmation
-                    response2 = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": None, "function_call": function_call},
-                                {"role": "function", "name": function_name, "content": str(execution_result)},
-                                {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                            ],
-                            "temperature": 0.3,
-                            "max_tokens": 50
-                        }
-                    )
-                response2.raise_for_status()
-                result2 = response2.json()
-                return result2["choices"][0]["message"]["content"]
-            else:
-                # No function call - check if we should auto-detect and call a function
-                content = message_obj.get("content", "")
-                
-                # Detect if LLM is describing an action instead of taking it
-                action_descriptors = [
-                    "i need to", "i'll", "i will", "let me", "let's", "i should",
-                    "to provide", "i can", "i would", "we need to", "we should"
-                ]
-                is_describing_action = any(desc in content.lower() for desc in action_descriptors)
-                
-                # Auto-detect "what X do I have" patterns and call list_available_entities
-                message_lower = message.lower()
-                what_patterns = [
-                    (r"what\s+(\w+)\s+do\s+i\s+have", None),  # "what locks do I have"
-                    (r"what\s+(\w+)\s+are\s+available", None),  # "what locks are available"
-                    (r"list\s+my\s+(\w+)", None),  # "list my locks"
-                    (r"show\s+me\s+my\s+(\w+)", None),  # "show me my locks"
-                ]
-                
-                import re
-                detected_domain = None
-                for pattern, _ in what_patterns:
-                    match = re.search(pattern, message_lower)
-                    if match:
-                        entity_type = match.group(1)
-                        # Map common entity types to domains
-                        domain_map = {
-                            "lock": "lock",
-                            "locks": "lock",
-                            "light": "light",
-                            "lights": "light",
-                            "switch": "switch",
-                            "switches": "switch",
-                            "speaker": "media_player",
-                            "speakers": "media_player",
-                            "media": "media_player",
-                            "player": "media_player",
-                            "device": None,  # No domain filter
-                            "devices": None,
-                            "entity": None,
-                            "entities": None,
-                        }
-                        detected_domain = domain_map.get(entity_type)
-                        if detected_domain or entity_type in ["device", "devices", "entity", "entities"]:
-                            logger.info(f"Auto-detected 'what {entity_type} do I have' pattern, calling list_available_entities")
-                            # Call the function directly
-                            function_args = {}
-                            if detected_domain:
-                                function_args["domain"] = detected_domain
-                            execution_result = await _execute_ha_function("list_available_entities", function_args)
-                            
-                            # Return the result directly (no need for second LLM call for list queries)
-                            return execution_result
-                
-                # If LLM is describing an action instead of taking it, force a retry with explicit instruction
-                if is_describing_action and not detected_domain:
-                    logger.warning(f"LLM described action instead of calling function. Content: {content[:100]}")
-                    logger.info("Retrying with explicit function call instruction")
-                    
-                    # Retry with explicit instruction
-                    retry_response = await client.post(
-                        f"{settings.vllm_url}/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {settings.vllm_api_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": message},
-                                {"role": "assistant", "content": content},
-                                {"role": "user", "content": "You must call a function to answer this question. Do not describe what you will do - actually call the function now."}
-                            ],
-                            "tools": tools,
-                            "tool_choice": "required",  # Force a tool call
-                            "temperature": 0.3,
-                            "max_tokens": 500
-                        }
-                    )
-                    retry_response.raise_for_status()
-                    retry_result = retry_response.json()
-                    retry_message_obj = retry_result["choices"][0]["message"]
-                    
-                    # Check if retry got a function call
-                    retry_tool_calls = retry_message_obj.get("tool_calls")
-                    retry_function_call = retry_message_obj.get("function_call")
-                    
-                    if retry_tool_calls or retry_function_call:
-                        # Process the function call (reuse the logic above)
-                        # For simplicity, we'll handle tool_calls format
-                        if retry_tool_calls and len(retry_tool_calls) > 0:
-                            tool_call = retry_tool_calls[0]
-                            function_name = tool_call["function"]["name"]
-                            function_args_str = tool_call["function"]["arguments"]
-                            if isinstance(function_args_str, str):
-                                function_args = json.loads(function_args_str)
-                            else:
-                                function_args = function_args_str
-                            
-                            logger.info(f"Retry: Executing function: {function_name} with args: {function_args}")
-                            
-                            # If listing lights for control purposes, also check switch domain
-                            if function_name == "list_available_entities" and function_args.get("domain") == "light":
-                                message_lower = message.lower() if message else ""
-                                if any(word in message_lower for word in ["turn", "on", "off", "control", "switch", "toggle"]):
-                                    logger.info("Retry: User wants to control lights - checking both 'light' and 'switch' domains")
-                                    light_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                                    switch_result = await _execute_ha_function(function_name, {"domain": "switch"}, original_message=message)
-                                    if "Found 0 entities" not in str(light_result) or "Found 0 entities" not in str(switch_result):
-                                        execution_result = f"Light domain entities:\n{light_result}\n\nSwitch domain entities (may include light switches):\n{switch_result}"
-                                    else:
-                                        execution_result = light_result
-                                else:
-                                    execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                            else:
-                                execution_result = await _execute_ha_function(function_name, function_args, original_message=message)
-                            
-                            logger.info(f"Retry: Function execution result: {execution_result}")
-                            
-                            # Check if execution result is an error - if so, return it directly
-                            if isinstance(execution_result, str) and (execution_result.startswith("Error:") or execution_result.startswith("Unknown function:")):
-                                logger.warning(f"Retry function execution returned error: {execution_result}")
-                                return execution_result
-                            
-                            # For list queries, let LLM format naturally; for actions, get brief confirmation
-                            if function_name == "list_available_entities":
-                                # Let LLM naturally format the list response
-                                response2 = await client.post(
-                                    f"{settings.vllm_url}/v1/chat/completions",
-                                    headers={
-                                        "Authorization": f"Bearer {settings.vllm_api_key}",
-                                        "Content-Type": "application/json"
-                                    },
-                                    json={
-                                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                        "messages": [
-                                            {"role": "system", "content": system_prompt},
-                                            {"role": "user", "content": message},
-                                            {"role": "assistant", "content": None, "tool_calls": retry_tool_calls},
-                                            {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]}
-                                        ],
-                                        "tools": tools,
-                                        "temperature": 0.3,
-                                        "max_tokens": 200
-                                    }
-                                )
-                                response2.raise_for_status()
-                                result2 = response2.json()
-                                return result2["choices"][0]["message"]["content"]
-                            else:
-                                # Get natural language response for actions
-                                response2 = await client.post(
-                                    f"{settings.vllm_url}/v1/chat/completions",
-                                    headers={
-                                        "Authorization": f"Bearer {settings.vllm_api_key}",
-                                        "Content-Type": "application/json"
-                                    },
-                                    json={
-                                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
-                                        "messages": [
-                                            {"role": "system", "content": system_prompt},
-                                            {"role": "user", "content": message},
-                                            {"role": "assistant", "content": None, "tool_calls": retry_tool_calls},
-                                            {"role": "tool", "name": function_name, "content": str(execution_result), "tool_call_id": tool_call["id"]},
-                                            {"role": "user", "content": "Respond with only a brief confirmation. Maximum 10 words. No pleasantries, no offers of help, no additional information."}
-                                        ],
-                                        "tools": tools,
-                                        "temperature": 0.3,
-                                        "max_tokens": 100
-                                    }
-                                )
-                                response2.raise_for_status()
-                                result2 = response2.json()
-                                return result2["choices"][0]["message"]["content"]
-                
-                # No function call and no auto-detection - return the response
-                logger.warning(f"No function call detected. Returning LLM response: {content[:100]}")
-                return content
-    
+        return await execute_ha_command(message, ha_client, settings)
     except Exception as e:
         logger.error(f"Error in HA command handler: {e}", exc_info=True)
         return f"I encountered an error processing your command: {str(e)}"
@@ -1369,16 +755,23 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
             elif function_name == "start_timer":
                 duration_minutes = args.get("duration_minutes", 0)
                 name = args.get("name")
-                duration_seconds = duration_minutes * 60
-                service_data = {"duration": duration_seconds}
-                if name:
-                    service_data["name"] = name
                 
+                if duration_minutes == 0:
+                    return "Error: duration_minutes is required for start_timer"
+                
+                # Convert minutes to HH:MM:SS format for the script
+                duration_hhmmss = _minutes_to_hhmmss(duration_minutes)
+                
+                # Call the set_next_available_timer script instead of timer.start directly
                 result = await ha_client.call_service(
-                    "timer",
-                    "start",
-                    **service_data
+                    "script",
+                    "turn_on",
+                    entity_id="script.set_next_available_timer",
+                    duration=duration_hhmmss
                 )
+                
+                # Note: The script doesn't support name parameter, so we ignore it
+                # The script will pick the first available timer (timer1-3) automatically
                 timer_name = name or "timer"
                 return f"Started {timer_name} for {duration_minutes} minutes"
             
@@ -1831,9 +1224,28 @@ async def _handle_automation_variation(message: str, context: Optional[Dict] = N
 
 async def _handle_general_chat(message: str) -> str:
     """
-    Handle general chat requests using vLLM
+    Handle general chat requests using vLLM with conversational system prompt
     """
     try:
+        # Load conversational system prompt
+        prompt_paths = [
+            "/app/prompts/conversational_system.txt",
+            "/opt/llm/prompts/conversational_system.txt"
+        ]
+        system_prompt = None
+        for prompt_path in prompt_paths:
+            try:
+                with open(prompt_path, "r") as f:
+                    system_prompt = f.read()
+                break
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        
+        if system_prompt is None:
+            system_prompt = "You are a helpful, conversational assistant. Engage naturally with the user in a friendly and informative manner."
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{settings.vllm_url}/v1/chat/completions",
@@ -1844,10 +1256,11 @@ async def _handle_general_chat(message: str) -> str:
                 json={
                     "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
                     "messages": [
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": message}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 500
+                    "max_tokens": 1000
                 }
             )
             response.raise_for_status()

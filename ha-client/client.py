@@ -47,7 +47,7 @@ class HomeAssistantClient:
     
     async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make a request to Home Assistant API"""
-        if not self._session:
+        if not self._session or self._session.closed:
             self._session = aiohttp.ClientSession()
         
         url = f"{self.url}/api/{endpoint}"

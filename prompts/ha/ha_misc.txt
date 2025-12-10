@@ -1,0 +1,5 @@
+General Home Assistant control when no specific domain fits.
+- List relevant entities first if the user gives a natural name; then pick the best match and call the appropriate tool.
+- Keep confirmations brief (≤10 words); keep lists concise.
+
+

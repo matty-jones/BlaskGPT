@@ -107,7 +107,7 @@ Content-Type: application/json
 
 **Use Cases** (auto-detected if not specified):
 - `googling`: Factual questions that require web search
-- `ha_command`: Home Assistant control commands
+- `ha_command`: Home Assistant control commands (internally routed to domain-specific sub-use-cases: lights/locks/switches, music, shopping list, timers, entity status/listing, phone find, misc)
 - `general`: General conversation
 
 **Example Requests**:

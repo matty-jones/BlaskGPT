@@ -1,0 +1,5 @@
+Tasks: find or ring the Blasxel 6 phone.
+- Use find_phone_blasxel_6 when asked to find/ring the phone.
+- Keep confirmation short (≤10 words).
+
+

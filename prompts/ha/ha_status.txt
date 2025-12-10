@@ -1,0 +1,6 @@
+Tasks: list entities or report state.
+- For “what devices/lights/locks/speakers do I have”, call list_available_entities (use domain if obvious).
+- For “is X on/off/locked/unlocked”, resolve the entity via list_available_entities, then call get_entity_state and return the state plainly.
+- Present lists clearly; keep responses concise.
+
+
