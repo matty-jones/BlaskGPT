@@ -4,3 +4,5 @@ Tasks: list entities or report state.
 - Present lists clearly; keep responses concise.
 
 
+
+

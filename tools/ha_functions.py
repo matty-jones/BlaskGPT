@@ -123,6 +123,30 @@ HA_FUNCTIONS = [
     {
         "type": "function",
         "function": {
+            "name": "control_media_playback",
+            "description": "Control media playback (next track, previous track, skip, back). If no speakers specified, uses last interacted speakers. Use list_available_entities for natural language names.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Speaker entity IDs. If empty, uses last interacted speakers. Use 'all' for all speakers."
+                    },
+                    "control_action": {
+                        "type": "string",
+                        "enum": ["next_track", "previous_track", "skip", "back"],
+                        "description": "Playback control action: next_track/skip for next track, previous_track/back for previous track",
+                        "default": "next_track"
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_item_to_shopping_list",
             "description": "Add an item to the Home Assistant shopping list. Use this when the user explicitly wants to ADD an item to the list.",
             "parameters": {

@@ -3,3 +3,5 @@ General Home Assistant control when no specific domain fits.
 - Keep confirmations brief (≤10 words); keep lists concise.
 
 
+
+

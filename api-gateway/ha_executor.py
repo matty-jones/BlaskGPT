@@ -37,6 +37,7 @@ def _minutes_to_hhmmss(minutes: int) -> str:
 ACTION_FUNCTIONS = {
     "play_media_on_speakers",
     "stop_media_on_speakers",
+    "control_media_playback",
     "set_volume_on_speakers",
     "add_item_to_shopping_list",
     "start_timer",
@@ -940,9 +941,14 @@ async def _execute_ha_function(
             elif function_name == "stop_media_on_speakers":
                 entity_names = args.get("entity_names", [])
                 action = args.get("action", "stop")
-                logger.info(f"[MA-debug] stop_media_on_speakers called with entity_names={entity_names}, action={action}")
 
-                if "all" in [name.lower() for name in entity_names]:
+                # Check if "all" is requested (check both the list and individual entity names)
+                is_all_requested = (
+                    "all" in [name.lower() for name in entity_names] or
+                    any("all" in name.lower() for name in entity_names)
+                )
+                
+                if is_all_requested:
                     speakers = await ha_client.find_speakers()
                     speakers = _filter_dummy_entities(speakers)
                     entity_ids = [s["entity_id"] for s in speakers]
@@ -961,11 +967,20 @@ async def _execute_ha_function(
                         else:
                             invalid_entities.append(entity_name)
 
-                    if invalid_entities:
-                        return f"Error: The following speaker entities were not found: {', '.join(invalid_entities)}. You must first call list_available_entities with domain='media_player' to get the exact entity_id from Home Assistant. Do not guess or construct entity_ids."
+                    # If all entities are invalid, try using context-aware last speakers
+                    if invalid_entities and not entity_ids:
+                        context_speakers = await _get_last_speakers()
+                        if context_speakers:
+                            logger.info(f"Using context-aware speakers for stop command: {context_speakers}")
+                            entity_ids = context_speakers
+                        else:
+                            return f"Error: The following speaker entities were not found: {', '.join(invalid_entities)}. You must first call list_available_entities with domain='media_player' to get the exact entity_id from Home Assistant. Do not guess or construct entity_ids."
 
                 if not entity_ids:
-                    return "Error: No valid speaker entities found. You must first call list_available_entities with domain='media_player' to get available speakers."
+                    # Final fallback: try context-aware speakers
+                    entity_ids = await _get_last_speakers()
+                    if not entity_ids:
+                        return "Error: No valid speaker entities found. You must first call list_available_entities with domain='media_player' to get available speakers."
 
                 # Call media_stop or media_pause based on action
                 service_name = "media_stop" if action == "stop" else "media_pause"
@@ -980,6 +995,86 @@ async def _execute_ha_function(
                 await _track_speakers(entity_ids)
                 action_word = "Stopped" if action == "stop" else "Paused"
                 return f"{action_word} media on speakers: {', '.join(entity_ids)}"
+
+            elif function_name == "control_media_playback":
+                entity_names = args.get("entity_names", [])
+                control_action = args.get("control_action", "next_track")
+                
+                # Get entity IDs - use context-aware last speakers if not provided
+                if not entity_names or (len(entity_names) == 1 and entity_names[0].lower() in ["", "none", "null"]):
+                    entity_ids = await _get_last_speakers()
+                    if not entity_ids:
+                        return "Error: No speakers specified and no previous speakers found. Please specify which speakers to control."
+                else:
+                    # Check if "all" is requested
+                    is_all_requested = (
+                        "all" in [name.lower() for name in entity_names] or
+                        any("all" in name.lower() for name in entity_names)
+                    )
+                    
+                    if is_all_requested:
+                        speakers = await ha_client.find_speakers()
+                        speakers = _filter_dummy_entities(speakers)
+                        entity_ids = [s["entity_id"] for s in speakers]
+                    else:
+                        entity_ids = []
+                        invalid_entities = []
+                        
+                        for entity_name in entity_names:
+                            if "." in entity_name:
+                                try:
+                                    await ha_client.get_entity(entity_name)
+                                    entity_ids.append(entity_name)
+                                except Exception as e:
+                                    logger.warning(f"Entity {entity_name} not found: {e}")
+                                    invalid_entities.append(entity_name)
+                            else:
+                                invalid_entities.append(entity_name)
+                        
+                        # If all entities are invalid, try using context-aware last speakers
+                        if invalid_entities and not entity_ids:
+                            context_speakers = await _get_last_speakers()
+                            if context_speakers:
+                                logger.info(f"Using context-aware speakers for playback control: {context_speakers}")
+                                entity_ids = context_speakers
+                            else:
+                                return f"Error: The following speaker entities were not found: {', '.join(invalid_entities)}. You must first call list_available_entities with domain='media_player' to get the exact entity_id from Home Assistant."
+                
+                if not entity_ids:
+                    return "Error: No valid speaker entities found."
+                
+                # Map control_action to Home Assistant service
+                service_map = {
+                    "next_track": "media_next_track",
+                    "previous_track": "media_previous_track",
+                    "skip": "media_next_track",
+                    "back": "media_previous_track",
+                }
+                
+                service_name = service_map.get(control_action, "media_next_track")
+                logger.info(f"Calling media_player.{service_name} on {entity_ids}")
+                
+                try:
+                    result = await ha_client.call_service(
+                        "media_player",
+                        service_name,
+                        entity_id=entity_ids,
+                    )
+                    logger.info(f"media_player.{service_name} service result: {result}")
+                    # Track speakers for context-aware future commands
+                    await _track_speakers(entity_ids)
+                    
+                    action_words = {
+                        "next_track": "Skipped to next track",
+                        "previous_track": "Skipped to previous track",
+                        "skip": "Skipped to next track",
+                        "back": "Skipped to previous track",
+                    }
+                    action_word = action_words.get(control_action, "Changed track")
+                    return f"{action_word} on speakers: {', '.join(entity_ids)}"
+                except Exception as e:
+                    logger.error(f"Error controlling playback: {e}", exc_info=True)
+                    return f"Error controlling playback: {str(e)}"
 
             elif function_name == "set_volume_on_speakers":
                 entity_names = args.get("entity_names", [])
