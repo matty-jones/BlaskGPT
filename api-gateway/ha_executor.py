@@ -508,11 +508,22 @@ def _filter_dummy_entities(entities: List[Dict[str, Any]]) -> List[Dict[str, Any
     for entity in entities:
         entity_id = entity.get("entity_id", "").lower()
         friendly_name = entity.get("attributes", {}).get("friendly_name", "").lower()
+        entity_id_original = entity.get("entity_id", "")
 
-        if "dummy" not in entity_id and "dummy" not in friendly_name:
+        # Filter out dummy entities and group/helper entities
+        is_dummy = "dummy" in entity_id or "dummy" in friendly_name
+        is_group_helper = (
+            "all_the_speakers" in entity_id or
+            "all_speakers" in entity_id or
+            entity_id.endswith("_all") or
+            entity_id.startswith("all_")
+        )
+
+        if not is_dummy and not is_group_helper:
             filtered.append(entity)
         else:
-            logger.debug(f"Filtered out dummy entity: {entity.get('entity_id')}")
+            filter_reason = "dummy" if is_dummy else "group/helper"
+            logger.debug(f"Filtered out {filter_reason} entity: {entity_id_original}")
 
     return filtered
 
@@ -603,7 +614,6 @@ async def _execute_ha_function(
                                 domain = entry.get("domain", "")
                                 entry_id = entry.get("entry_id", "")
                                 title = entry.get("title", "")
-                                logger.info(f"[MA-debug] Config entry: domain={domain}, entry_id={entry_id}, title={title}")
                                 if domain == "music_assistant":
                                     config_entry_id = entry_id
                                     logger.info(f"[MA-debug] Found Music Assistant config_entry_id: {config_entry_id}")
@@ -770,47 +780,94 @@ async def _execute_ha_function(
                     # Automatically play the selected match
                     logger.info(f"[MA-debug] Auto-playing {best_match['name']} ({best_match['media_type']}) on {entity_ids}")
                     results = []
-                    for eid in entity_ids:
-                        try:
-                            # Set the media content
-                            logger.info(f"[MA-debug] Setting media_content_id on '{eid}' to '{best_match['uri']}'")
-                            set_result = await ha_client.call_service(
-                                "media_player",
-                                "play_media",
-                                entity_id=eid,
-                                media_content_id=best_match["uri"],
-                                media_content_type=media_content_type,
-                            )
-                            logger.info(f"[MA-debug] media_player.play_media result for {eid}: {set_result}")
-                            
-                            # For artists/playlists, Music Assistant may need a moment to queue tracks
-                            if best_match["media_type"] in ["artist", "playlist"]:
-                                await asyncio.sleep(0.5)  # Brief delay for queueing
-                            
-                            # Start playback
-                            logger.info(f"[MA-debug] Starting playback on '{eid}'")
-                            play_result = await ha_client.call_service(
-                                "media_player",
-                                "media_play",
-                                entity_id=eid,
-                            )
-                            logger.info(f"[MA-debug] media_player.media_play result for {eid}: {play_result}")
-                            
-                            # Check entity state to verify playback started
-                            await asyncio.sleep(0.3)  # Brief delay before checking state
+                    
+                    # For tracks, use the script to play track then append artist radio
+                    if best_match["media_type"] == "track":
+                        logger.info(f"[MA-debug] Track detected, calling script.play_track_then_artist_radio")
+                        for eid in entity_ids:
                             try:
-                                entity_state = await ha_client.get_entity(eid)
-                                state = entity_state.get("state", "unknown")
-                                logger.info(f"[MA-debug] Entity {eid} state after playback: {state}")
-                                if state not in ["playing", "buffering"]:
-                                    logger.warning(f"[MA-debug] Entity {eid} is not playing (state: {state})")
-                            except Exception as state_check_error:
-                                logger.warning(f"[MA-debug] Could not check state for {eid}: {state_check_error}")
-                            
-                            results.append(f"Success for {eid}")
-                        except Exception as e:
-                            logger.error(f"[MA-debug] Playback failed for {eid}: {e}", exc_info=True)
-                            results.append(f"Error for {eid}: {str(e)}")
+                                logger.info(f"[MA-debug] Calling script.play_track_then_artist_radio for {eid} with track_uri={best_match['uri']}, artist_name={best_match.get('artist', '')}")
+                                script_result = await ha_client.call_service(
+                                    "script",
+                                    "turn_on",
+                                    entity_id="script.play_track_then_artist_radio",
+                                    variables={
+                                        "player_entity": eid,
+                                        "track_uri": best_match["uri"],
+                                        "artist_name": best_match.get("artist", "")
+                                    }
+                                )
+                                logger.info(f"[MA-debug] script.play_track_then_artist_radio result for {eid}: {script_result}")
+                                results.append(f"Success for {eid}")
+                            except Exception as e:
+                                logger.error(f"[MA-debug] Script call failed for {eid}: {e}", exc_info=True)
+                                error_str = str(e)
+                                # If script doesn't exist, fall back to direct playback
+                                if "404" in error_str or "not found" in error_str.lower() or "unavailable" in error_str.lower():
+                                    logger.warning(f"[MA-debug] Script not found, falling back to direct playback for {eid}")
+                                    try:
+                                        set_result = await ha_client.call_service(
+                                            "media_player",
+                                            "play_media",
+                                            entity_id=eid,
+                                            media_content_id=best_match["uri"],
+                                            media_content_type=media_content_type,
+                                        )
+                                        play_result = await ha_client.call_service(
+                                            "media_player",
+                                            "media_play",
+                                            entity_id=eid,
+                                        )
+                                        logger.info(f"[MA-debug] Fallback playback result for {eid}: {play_result}")
+                                        results.append(f"Success for {eid} (fallback)")
+                                    except Exception as fallback_error:
+                                        logger.error(f"[MA-debug] Fallback playback also failed for {eid}: {fallback_error}", exc_info=True)
+                                        results.append(f"Error for {eid}: {str(fallback_error)}")
+                                else:
+                                    results.append(f"Error for {eid}: {str(e)}")
+                    else:
+                        # For non-track media types (artists, playlists, albums), use existing playback logic
+                        for eid in entity_ids:
+                            try:
+                                # Set the media content
+                                logger.info(f"[MA-debug] Setting media_content_id on '{eid}' to '{best_match['uri']}'")
+                                set_result = await ha_client.call_service(
+                                    "media_player",
+                                    "play_media",
+                                    entity_id=eid,
+                                    media_content_id=best_match["uri"],
+                                    media_content_type=media_content_type,
+                                )
+                                logger.info(f"[MA-debug] media_player.play_media result for {eid}: {set_result}")
+                                
+                                # For artists/playlists, Music Assistant may need a moment to queue tracks
+                                if best_match["media_type"] in ["artist", "playlist"]:
+                                    await asyncio.sleep(0.5)  # Brief delay for queueing
+                                
+                                # Start playback
+                                logger.info(f"[MA-debug] Starting playback on '{eid}'")
+                                play_result = await ha_client.call_service(
+                                    "media_player",
+                                    "media_play",
+                                    entity_id=eid,
+                                )
+                                logger.info(f"[MA-debug] media_player.media_play result for {eid}: {play_result}")
+                                
+                                # Check entity state to verify playback started
+                                await asyncio.sleep(0.3)  # Brief delay before checking state
+                                try:
+                                    entity_state = await ha_client.get_entity(eid)
+                                    state = entity_state.get("state", "unknown")
+                                    logger.info(f"[MA-debug] Entity {eid} state after playback: {state}")
+                                    if state not in ["playing", "buffering"]:
+                                        logger.warning(f"[MA-debug] Entity {eid} is not playing (state: {state})")
+                                except Exception as state_check_error:
+                                    logger.warning(f"[MA-debug] Could not check state for {eid}: {state_check_error}")
+                                
+                                results.append(f"Success for {eid}")
+                            except Exception as e:
+                                logger.error(f"[MA-debug] Playback failed for {eid}: {e}", exc_info=True)
+                                results.append(f"Error for {eid}: {str(e)}")
                     
                     # Track speakers for context-aware future commands
                     await _track_speakers(entity_ids)
@@ -984,6 +1041,13 @@ async def _execute_ha_function(
 
                 # Call media_stop or media_pause based on action
                 service_name = "media_stop" if action == "stop" else "media_pause"
+                # #region agent log
+                import json
+                try:
+                    with open('/opt/llm/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A,B,C","location":"ha_executor.py:1034","message":"Before service call","data":{"service_name":service_name,"entity_count":len(entity_ids),"entity_ids":entity_ids},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+                except: pass
+                # #endregion
                 logger.info(f"Calling media_player.{service_name} on {entity_ids}")
                 result = await ha_client.call_service(
                     "media_player",

@@ -1,0 +1,87 @@
+# Home Assistant Script Template: play_track_then_artist_radio
+#
+# This script plays a specific track and then automatically appends artist radio to the queue.
+# Requires Music Assistant integration to be installed.
+#
+# Installation:
+# 1. Copy this script definition to your Home Assistant configuration
+# 2. Place it in your scripts.yaml file, or in a separate file that's included in configuration.yaml
+#    (e.g., if using packages, add to packages/scripts.yaml)
+# 3. Restart Home Assistant to load the script
+#
+# Usage:
+# This script is automatically called by the LLM API Gateway when a track is selected.
+# You can also call it manually from Home Assistant:
+#   service: script.play_track_then_artist_radio
+#   data:
+#     player_entity: media_player.your_speaker_2
+#     track_uri: library://track/123
+#     artist_name: "Artist Name"  # Optional
+
+script:
+  play_track_then_artist_radio:
+    alias: Play track then artist radio (Music Assistant)
+    mode: restart
+    fields:
+      player_entity:
+        description: Target player entity_id (e.g. media_player.satellite_speaker_2)
+        example: media_player.satellite_speaker_2
+      track_uri:
+        description: Track URI from Music Assistant search (e.g. library://track/123)
+      artist_name:
+        description: Optional artist name; if omitted, resolved from player metadata
+        required: false
+
+    sequence:
+      # 0) Wait for player to be ready (not connecting/unknown/unavailable)
+      - wait_template: >
+          {{
+            states(player_entity) not in ['connecting', 'unknown', 'unavailable']
+          }}
+        timeout: "00:00:10"
+        continue_on_timeout: true
+
+      # 1) Play the requested track and replace the queue
+      - service: music_assistant.play_media
+        target:
+          entity_id: "{{ player_entity }}"
+        data:
+          media_id: "{{ track_uri }}"
+          enqueue: replace
+
+      # 2) Wait briefly for media_artist to populate if artist_name not provided
+      - wait_template: >
+          {{
+            (artist_name is defined and artist_name|trim != '') or
+            (state_attr(player_entity, 'media_artist') is not none and
+             state_attr(player_entity, 'media_artist')|trim != '')
+          }}
+        timeout: "00:00:10"
+
+      - variables:
+          resolved_artist: >-
+            {{
+              (artist_name if (artist_name is defined and artist_name|trim != '')
+              else state_attr(player_entity, 'media_artist')) | trim
+            }}
+
+      # 3) Append artist radio after the current track
+      - service: music_assistant.play_media
+        target:
+          entity_id: "{{ player_entity }}"
+        data:
+          media_id: "{{ resolved_artist }}"
+          media_type: artist
+          enqueue: add
+          radio_mode: true
+
+# Notes:
+# - This script uses music_assistant.play_media service which supports radio_mode.
+# - The script will skip radio append if artist metadata cannot be resolved (after 10 second timeout).
+# - Radio mode requires a provider that supports dynamic tracks (Subsonic/Gonic, Spotify, Apple Music, etc.).
+# - If you want shuffled radio tracks, add this after step 3:
+#   - service: media_player.shuffle_set
+#     target:
+#       entity_id: "{{ player_entity }}"
+#     data:
+#       shuffle: true

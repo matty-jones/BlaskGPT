@@ -5,3 +5,16 @@ General Home Assistant control when no specific domain fits.
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
