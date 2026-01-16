@@ -19,6 +19,7 @@ from tools.ha_functions import get_function_schemas, get_function_schemas_by_nam
 from music_matcher import (
     extract_type_hint,
     extract_artist_hint,
+    extract_live_hint,
     select_best_match,
 )
 
@@ -588,12 +589,13 @@ async def _execute_ha_function(
                 # Extract hints from raw utterance
                 parsed_type_hint = extract_type_hint(raw_utterance) if raw_utterance else None
                 artist_hint = extract_artist_hint(raw_utterance) if raw_utterance else None
+                live_hint = extract_live_hint(raw_utterance) if raw_utterance else False
                 
                 # Combine type hints: parsed hint takes precedence, but LLM hint is also considered
                 # If parsed hint exists, use it; otherwise use LLM hint if not "any"
                 final_type_hint = parsed_type_hint if parsed_type_hint else (media_type_hint if media_type_hint != "any" else None)
                 
-                logger.info(f"[MA-debug] Query: '{query}', parsed_type_hint: {parsed_type_hint}, LLM_type_hint: {media_type_hint}, final_type_hint: {final_type_hint}, artist_hint: {artist_hint}")
+                logger.info(f"[MA-debug] Query: '{query}', parsed_type_hint: {parsed_type_hint}, LLM_type_hint: {media_type_hint}, final_type_hint: {final_type_hint}, artist_hint: {artist_hint}, live_hint: {live_hint}")
 
                 try:
                     speakers = await ha_client.find_speakers()
@@ -716,6 +718,7 @@ async def _execute_ha_function(
                         search_results=items[:limit],  # Limit items for scoring
                         type_hint=final_type_hint,
                         artist_hint=artist_hint,
+                        live_hint=live_hint,
                     )
                     
                     if not best_match:

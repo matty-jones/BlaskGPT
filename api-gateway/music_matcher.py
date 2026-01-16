@@ -141,11 +141,99 @@ def extract_artist_hint(raw_utterance: str) -> Optional[str]:
     return None
 
 
+def extract_live_hint(raw_utterance: str) -> bool:
+    """
+    Extract live version hint from user utterance.
+    
+    Looks for patterns like "live version", "live", "concert version", etc.
+    
+    Args:
+        raw_utterance: Original user message
+        
+    Returns:
+        True if user wants live version, False otherwise
+    """
+    if not raw_utterance:
+        return False
+    
+    utterance_lower = raw_utterance.lower()
+    
+    # Check for explicit live version requests
+    live_patterns = [
+        r'\blive\s+version\b',
+        r'\bconcert\s+version\b',
+        r'\blive\s+recording\b',
+        r'\blive\s+at\b',
+        r'\blive\s+from\b',
+    ]
+    
+    for pattern in live_patterns:
+        if re.search(pattern, utterance_lower):
+            return True
+    
+    return False
+
+
+def is_live_version(track_item: Dict[str, Any], track_name: str) -> bool:
+    """
+    Check if a track indicates it's a live version.
+    
+    Checks the track name, 'version' field, and album name in the item metadata.
+    
+    Args:
+        track_item: The track item dict (may contain 'version' field and 'album' field)
+        track_name: The track name to check
+        
+    Returns:
+        True if track appears to be a live version, False otherwise
+    """
+    if not track_name:
+        return False
+    
+    # Check version field in metadata (e.g., 'version': 'live')
+    version = track_item.get("version", "")
+    if version and isinstance(version, str) and "live" in version.lower():
+        return True
+    
+    name_lower = track_name.lower()
+    
+    # Check for live indicators in track name
+    live_indicators = [
+        "(live",
+        " (live)",
+        " - live",
+        " [live]",
+        "live at",
+        "live from",
+        "live version",
+        "concert",
+    ]
+    
+    for indicator in live_indicators:
+        if indicator in name_lower:
+            return True
+    
+    # Check album name for live indicators
+    album = track_item.get("album", {})
+    if isinstance(album, dict):
+        album_name = album.get("name", "")
+        if album_name:
+            album_lower = album_name.lower()
+            if "live" in album_lower:
+                return True
+    elif isinstance(album, str):
+        if "live" in album.lower():
+            return True
+    
+    return False
+
+
 def select_best_match(
     query: str,
     search_results: List[Dict[str, Any]],
     type_hint: Optional[str] = None,
     artist_hint: Optional[str] = None,
+    live_hint: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Select the best match from search results using fuzzy scoring and hierarchy.
@@ -155,6 +243,7 @@ def select_best_match(
         search_results: List of search result dicts with keys like uri, name, media_type, artists
         type_hint: Optional type hint ("playlist", "artist", "track", "album")
         artist_hint: Optional artist name hint
+        live_hint: If True, prefer live versions; if False (default), prefer non-live versions
         
     Returns:
         Best match dict with uri, media_type, name, etc., or None if no good match
@@ -204,16 +293,68 @@ def select_best_match(
         return None
     
     # Group by type and find best in each category
+    # For tracks, we need special handling to prefer non-live versions
     best_by_type = {}
+    track_candidates = []
+    
     for candidate in scored_candidates:
         item_type = candidate["type"]
-        if item_type not in best_by_type or candidate["score"] > best_by_type[item_type]["score"]:
-            best_by_type[item_type] = candidate
+        if item_type == "track":
+            track_candidates.append(candidate)
+        else:
+            if item_type not in best_by_type or candidate["score"] > best_by_type[item_type]["score"]:
+                best_by_type[item_type] = candidate
+    
+    # For tracks, apply live/non-live preference when scores are close
+    best_track = None
+    if track_candidates:
+        # Sort tracks by score (highest first)
+        track_candidates.sort(key=lambda c: c["score"], reverse=True)
+        best_track_score = track_candidates[0]["score"]
+        
+        # Consider tracks within 5 points of the best score
+        score_threshold = best_track_score - 5
+        candidate_tracks = [c for c in track_candidates if c["score"] >= score_threshold]
+        
+        # Debug: log all candidate tracks
+        logger.info(f"[MusicMatcher] Track selection: {len(candidate_tracks)} tracks within {score_threshold}-{best_track_score} score range")
+        for c in candidate_tracks:
+            is_live = is_live_version(c["item"], c["name"])
+            logger.info(f"[MusicMatcher] Candidate: '{c['name']}' (score: {c['score']}, live: {is_live})")
+        
+        # Separate live and non-live tracks
+        live_tracks = [c for c in candidate_tracks if is_live_version(c["item"], c["name"])]
+        non_live_tracks = [c for c in candidate_tracks if not is_live_version(c["item"], c["name"])]
+        
+        logger.info(f"[MusicMatcher] Track filtering: {len(live_tracks)} live, {len(non_live_tracks)} non-live, live_hint: {live_hint}")
+        
+        # Select based on live_hint preference
+        if live_hint:
+            # User wants live version - prefer live tracks
+            if live_tracks:
+                best_track = live_tracks[0]  # Already sorted by score
+                logger.info(f"[MusicMatcher] Selected live track (user requested): {best_track['name']} (score: {best_track['score']})")
+            else:
+                # No live tracks found, use best available
+                best_track = candidate_tracks[0]
+                logger.info(f"[MusicMatcher] Selected track (live requested but not found): {best_track['name']} (score: {best_track['score']})")
+        else:
+            # User didn't request live - prefer non-live tracks
+            if non_live_tracks:
+                best_track = non_live_tracks[0]  # Already sorted by score
+                logger.info(f"[MusicMatcher] Selected non-live track (preferred): {best_track['name']} (score: {best_track['score']})")
+            else:
+                # No non-live tracks found, use best available
+                best_track = candidate_tracks[0]
+                logger.info(f"[MusicMatcher] Selected track (only live available): {best_track['name']} (score: {best_track['score']})")
+        
+        best_by_type["track"] = best_track
     
     logger.info(f"[MusicMatcher] Best scores by type: {[(t, b['score']) for t, b in best_by_type.items()]}")
     
     # Apply hierarchy logic
-    best_track = best_by_type.get("track")
+    if not best_track:
+        best_track = best_by_type.get("track")
     best_playlist = best_by_type.get("playlist")
     best_artist = best_by_type.get("artist")
     best_album = best_by_type.get("album")

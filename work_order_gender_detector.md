@@ -322,7 +322,7 @@ Add tests under `services/gender_classifier/tests/`, e.g.:
 
 2. `test_model_prediction_stub.py`
 
-   * Use a **small dummy audio file** (Matty will provide or you can synthesise a short sine wave / noise using `scipy`/`numpy` and save as WAV).
+   * Use a **small dummy audio file** (you can synthesise a short sine wave / noise using `scipy`/`numpy` and save as WAV).
 
    * Ensure `predict_file` returns a dict with the expected keys and probability values between `0` and `1`.
 
