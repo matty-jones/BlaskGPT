@@ -5,7 +5,6 @@ services:
     container_name: vllm
     runtime: nvidia
     deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
-    ports: ["9000:8000"]
     volumes: ["/opt/llm/hf_cache:/root/.cache/huggingface"]
     command:
       - --model
@@ -49,6 +48,26 @@ services:
       - llm-network
     restart: unless-stopped
 
+  blaskgpt:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: blaskgpt
+    ports: ["3000:8080"]
+    environment:
+      - WEBUI_AUTH=False
+      - OPENAI_API_BASE_URL=http://vllm:8000/v1
+      - OPENAI_API_KEY=local-dev-key
+      - OPENAI_VERIFY_SSL=false
+    volumes:
+      - open-webui:/app/backend/data
+    networks:
+      - llm-network
+    depends_on:
+      - vllm
+    restart: unless-stopped
+
 networks:
   llm-network:
     driver: bridge
+
+volumes:
+  open-webui:

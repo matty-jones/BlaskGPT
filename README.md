@@ -18,33 +18,44 @@ This project provides a locally-hosted large language model (LLM) integration fo
 ## Architecture
 
 ```
-┌─────────────────┐
-│  Home Assistant │
-│  (Voice/Webhook)│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────┐
-│     API Gateway (FastAPI)       │
-│  Port 8080                      │
-│  - Request routing              │
-│  - Use case detection           │
-│  - Context management           │
-└────────┬────────────────────────┘
-         │
-    ┌────┴────┬──────────────┬─────────────┐
-    │         │              │             │
-    ▼         ▼              ▼             ▼
-┌────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────┐
-│  vLLM  │ │   Web    │ │    HA    │ │ Automation  │
-│  API   │ │  Search  │ │  Client  │ │  Variations │
-│ :9000  │ │ Service  │ │          │ │   Engine    │
-└────────┘ └──────────┘ └──────────┘ └─────────────┘
+┌─────────────────┐         ┌─────────────────┐
+│  Home Assistant │         │  Web Browser    │
+│  (Voice/Webhook)│         │  (BlaskGPT UI)  │
+└────────┬────────┘         └────────┬────────┘
+         │                            │
+         ▼                            ▼
+┌─────────────────────────────────┐ ┌──────────────────────────────┐
+│     API Gateway (FastAPI)       │ │  BlaskGPT (OpenWebUI)        │
+│  Port 8080                      │ │  Port 3000                   │
+│  - Request routing              │ │  - ChatGPT-like UI            │
+│  - Use case detection           │ │  - No authentication          │
+│  - Context management          │ │  - General-purpose chat       │
+└────────┬────────────────────────┘ └────────┬───────────────────────┘
+         │                                    │
+         └────────────┬───────────────────────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │  vLLM (Internal)│
+              │  Port 8000      │
+              │  - Model serving │
+              │  - Internal only │
+              └────────┬────────┘
+                       │
+         ┌─────────────┼─────────────┐
+         │             │             │
+         ▼             ▼             ▼
+    ┌──────────┐ ┌──────────┐ ┌─────────────┐
+    │   Web    │ │    HA    │ │ Automation  │
+    │  Search  │ │  Client  │ │  Variations │
+    │ Service  │ │          │ │   Engine    │
+    └──────────┘ └──────────┘ └─────────────┘
 ```
 
 **Components**:
-- **vLLM**: Serves the Qwen2.5-7B-Instruct-AWQ model via OpenAI-compatible API (external port 9000)
+- **vLLM**: Serves the Qwen2.5-7B-Instruct-AWQ model via OpenAI-compatible API (internal only, port 8000)
 - **API Gateway**: FastAPI service that routes requests and coordinates components (port 8080)
+- **BlaskGPT (OpenWebUI)**: General-purpose ChatGPT-like web UI (port 3000, no authentication)
 - **HA Client**: Python client for Home Assistant API integration
 - **Search Service**: Web search integration using DuckDuckGo
 - **Automation Variations**: LLM-powered message variation generator
@@ -90,14 +101,14 @@ docker compose logs -f
 
 Verify services are running:
 ```bash
-# Test vLLM (external access)
-curl http://localhost:9000/health
-
 # Test API Gateway
 curl http://localhost:8080/health
+
+# Test BlaskGPT (OpenWebUI)
+curl http://localhost:3000
 ```
 
-**Note**: vLLM is accessible externally on port 9000, but internally uses port 8000 for Docker network communication.
+**Note**: vLLM is internal-only and not accessible from the LAN. Both API Gateway and BlaskGPT connect to vLLM via the internal Docker network on port 8000.
 
 ## API Endpoints
 
@@ -200,6 +211,30 @@ Content-Type: application/json
   "count": 1
 }
 ```
+
+## BlaskGPT (OpenWebUI) Web Interface
+
+BlaskGPT provides a general-purpose ChatGPT-like web interface for interacting with the local LLM. It runs in parallel with the API Gateway and shares the same vLLM backend.
+
+### Access
+
+- **URL**: `http://<host>:3000`
+- **Authentication**: Disabled (single-user mode, LAN access only)
+- **Model**: Automatically connects to Qwen2.5-7B-Instruct-AWQ via internal vLLM
+
+### Features
+
+- Natural language chat interface
+- Conversation history
+- Model selection (shows available models from vLLM)
+- No login required (suitable for trusted LAN environments)
+
+### Security Note
+
+BlaskGPT is configured without authentication for ease of use on a trusted LAN. Anyone on your local network can access it. For additional security, consider:
+- Placing it behind a reverse proxy with authentication
+- Enabling `WEBUI_AUTH=True` in `compose.yml` (requires user registration)
+- Using firewall rules to restrict access
 
 ## Integration with Home Assistant
 
@@ -452,14 +487,16 @@ python chat.py --use-case googling "What is the speed of light?"
 ### Service Health Issues
 - Check Docker logs: `docker compose logs api-gateway`
 - Check vLLM logs: `docker compose logs vllm`
+- Check BlaskGPT logs: `docker compose logs blaskgpt`
 - Verify HA connection: Check API Gateway startup logs
-- Test vLLM: `curl http://localhost:9000/health`
 - Test API Gateway: `curl http://localhost:8080/health`
+- Test BlaskGPT: `curl http://localhost:3000`
 
 ### vLLM Connection Issues
-- Verify vLLM is accessible: `curl http://localhost:9000/health`
-- Check API key matches in `.env` and `compose.yml`
+- vLLM is internal-only and not accessible from LAN (by design)
+- Check API key matches in `.env` and `compose.yml` (should be `local-dev-key`)
 - Verify network connectivity between containers: `docker network inspect llm_llm-network`
+- Check that both API Gateway and BlaskGPT can reach vLLM internally: `docker compose exec api-gateway curl http://vllm:8000/health`
 
 ### Home Assistant Connection Issues
 - Verify HA URL is correct and accessible
