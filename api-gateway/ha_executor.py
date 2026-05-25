@@ -84,7 +84,7 @@ async def _get_last_speakers(user_id: Optional[str] = None) -> List[str]:
         return _LAST_INTERACTED_SPEAKERS.get(key, []).copy()
 
 
-async def handle_ha_command(message: str, ha_client, settings) -> str:
+async def handle_ha_command(message: str, ha_client, settings, max_tokens: int = 200) -> str:
     """Route to sub-use-case and execute with scoped tools/prompt."""
     sub_use_case = classify_ha_sub_use_case(message)
     system_prompt = build_system_prompt(sub_use_case)
@@ -107,6 +107,7 @@ async def handle_ha_command(message: str, ha_client, settings) -> str:
         ha_client=ha_client,
         settings=settings,
         extra_tool_messages=extra_tool_messages,
+        max_tokens=max_tokens,
     )
 
 
@@ -117,6 +118,7 @@ async def _run_tool_flow(
     ha_client,
     settings,
     extra_tool_messages: Optional[List[Dict[str, Any]]] = None,
+    max_tokens: int = 200,
 ) -> str:
     """Single tool-call turn followed by brief confirmation or list formatting."""
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -140,7 +142,7 @@ async def _run_tool_flow(
                 "tools": tools,
                 "tool_choice": "auto",
                 "temperature": 0.3,
-                "max_tokens": 200,
+                "max_tokens": max_tokens,
             },
         )
         if first.status_code != 200:
@@ -217,6 +219,7 @@ async def _run_tool_flow(
                     prior_tool_result=execution_result,
                     ha_client=ha_client,
                     settings=settings,
+                    max_tokens=max_tokens,
                 )
                 if retry_resp:
                     return retry_resp
@@ -251,7 +254,7 @@ async def _run_tool_flow(
                     "tools": tools,
                     "tool_choice": "auto",
                     "temperature": 0.3,
-                    "max_tokens": 200,
+                    "max_tokens": max_tokens,
                 },
             )
             second.raise_for_status()
@@ -323,7 +326,7 @@ async def _run_tool_flow(
                         "messages": final_messages,
                         "tools": tools,
                         "temperature": 0.3,
-                        "max_tokens": 200,
+                        "max_tokens": max_tokens,
                     },
                 )
                 final.raise_for_status()
@@ -353,6 +356,7 @@ async def _retry_with_entity_listing(
     prior_tool_result: str,
     ha_client,
     settings,
+    max_tokens: int = 200,
 ) -> Optional[str]:
     """When entity_id was guessed and not found, list entities and force a new tool call."""
     listings_parts: List[str] = []
@@ -408,7 +412,7 @@ async def _retry_with_entity_listing(
                 "tools": tools,
                 "tool_choice": "required",
                 "temperature": 0.3,
-                "max_tokens": 200,
+                "max_tokens": max_tokens,
             },
     )
     retry.raise_for_status()
@@ -461,7 +465,7 @@ async def _retry_with_entity_listing(
             "messages": follow_messages,
             "tools": tools,
             "temperature": 0.3,
-            "max_tokens": 200,
+            "max_tokens": max_tokens,
         },
     )
     final.raise_for_status()

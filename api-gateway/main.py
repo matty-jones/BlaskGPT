@@ -237,6 +237,23 @@ async def health_check():
     return {"status": "healthy", "service": "api-gateway"}
 
 
+# OpenAI-compatible model discovery endpoint
+@app.get("/v1/models")
+async def list_models():
+    """Minimal OpenAI-compatible model list for Home Assistant / Extended OpenAI discovery"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "blaskgpt",
+                "object": "model",
+                "created": 0,
+                "owned_by": "local",
+            }
+        ],
+    }
+
+
 # OpenAI-compatible chat completion endpoint
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
@@ -272,18 +289,30 @@ async def chat_completions(request: ChatCompletionRequest):
         else:
             use_case = await _detect_use_case(user_message)
         
-        logger.info(f"Processing request: use_case={use_case}, message={user_message[:50]}...")
+        # Determine max_tokens: use request value if provided, otherwise use case-specific defaults
+        if request.max_tokens is not None:
+            max_tokens = request.max_tokens
+        else:
+            # Use case-specific defaults
+            if use_case == "ha_command":
+                max_tokens = 200  # Keep low for TTS
+            elif use_case == "googling":
+                max_tokens = 300
+            else:
+                max_tokens = 2000  # Higher default for general chat/WebUI
         
-        # Route to appropriate handler
+        logger.info(f"Processing request: use_case={use_case}, max_tokens={max_tokens}, message={user_message[:50]}...")
+        
+        # Route to appropriate handler, passing max_tokens
         if use_case == "ha_command":
-            response_text = await execute_ha_command(user_message, ha_client, settings)
+            response_text = await execute_ha_command(user_message, ha_client, settings, max_tokens=max_tokens)
         elif use_case == "googling":
-            response_text = await _handle_googling(user_message)
+            response_text = await _handle_googling(user_message, max_tokens=max_tokens)
         elif use_case == "automation_variation":
             response_text = await _handle_automation_variation(user_message, None)
         else:
             # Default: general chat
-            response_text = await _handle_general_chat(user_message)
+            response_text = await _handle_general_chat(user_message, max_tokens=max_tokens)
         
         # Build OpenAI-compatible response
         response_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -393,10 +422,10 @@ Respond with ONLY the use case name (one word), nothing else."""
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    "model": "blaskgpt",
                     "messages": [
                         {"role": "system", "content": classification_prompt},
-                        {"role": "user", "content": message}
+                        {"role": "user", "content": f"/no_think {message}"}
                     ],
                     "temperature": 0.1,  # Low temperature for consistent classification
                     "max_tokens": 10  # Just need the use case name
@@ -904,7 +933,7 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                             "Content-Type": "application/json"
                                         },
                                         json={
-                                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                                            "model": "blaskgpt",
                                             "messages": [
                                                 {"role": "system", "content": "You match user descriptions to Home Assistant entities using semantic understanding. Match based on meaning: vehicle names/brands match 'car', room names match locations, device types match functions. Return ONLY the exact entity_id that best matches, nothing else."},
                                                 {"role": "user", "content": f"User said: '{original_message if original_message else search_term}'\n\nAvailable {domains_str} entities:\n{entity_list_str}\n\nWhich entity_id semantically matches what the user wants to control? Use semantic understanding - for example, 'car' matches vehicle names like 'rav4', 'toyota', etc., 'den lights' matches entities with 'den' in the name. Return only the entity_id."}
@@ -1050,7 +1079,7 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                             "Content-Type": "application/json"
                                         },
                                         json={
-                                            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                                            "model": "blaskgpt",
                                             "messages": [
                                                 {"role": "system", "content": "You match user descriptions to Home Assistant entities using semantic understanding. Match based on meaning: vehicle names/brands match 'car', room names match locations, device types match functions. Return ONLY the exact entity_id that best matches, nothing else."},
                                                 {"role": "user", "content": f"User said: '{user_description}'\n\nAvailable entities:\n{entity_list_str}\n\nWhich entity_id semantically matches what the user wants to control? Return only the entity_id."}
@@ -1137,7 +1166,7 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
         return f"Error executing function: {str(e)}"
 
 
-async def _handle_googling(message: str) -> str:
+async def _handle_googling(message: str, max_tokens: int = 300) -> str:
     """
     Handle googling/search queries with web search
     """
@@ -1183,18 +1212,22 @@ async def _handle_googling(message: str) -> str:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    "model": "blaskgpt",
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Question: {message}\n\nSearch Results:\n{search_context}\n\nAnswer the question concisely:"}
                     ],
                     "temperature": 0.3,  # Lower temperature for factual answers
-                    "max_tokens": 300
+                    "max_tokens": max_tokens
                 }
             )
             response.raise_for_status()
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            message_obj = result["choices"][0]["message"]
+            content = message_obj.get("content") or ""
+            if not content:
+                logger.warning(f"LLM returned empty content. message={message_obj}")
+            return content
     
     except Exception as e:
         logger.error(f"Error in googling handler: {e}", exc_info=True)
@@ -1222,7 +1255,7 @@ async def _handle_automation_variation(message: str, context: Optional[Dict] = N
         return message  # Fallback to original message
 
 
-async def _handle_general_chat(message: str) -> str:
+async def _handle_general_chat(message: str, max_tokens: int = 2000) -> str:
     """
     Handle general chat requests using vLLM with conversational system prompt
     """
@@ -1254,18 +1287,25 @@ async def _handle_general_chat(message: str) -> str:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    "model": "blaskgpt",
                     "messages": [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": message}
+                        {"role": "user", "content": f"/no_think {message}"}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 1000
+                    "max_tokens": max_tokens,
+                    "chat_template_kwargs": {
+                        "enable_thinking": False
+                    }
                 }
             )
             response.raise_for_status()
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            message_obj = result["choices"][0]["message"]
+            content = message_obj.get("content") or ""
+            if not content:
+                logger.warning(f"LLM returned empty content. message={message_obj}")
+            return content
     
     except Exception as e:
         logger.error(f"Error calling vLLM: {e}")

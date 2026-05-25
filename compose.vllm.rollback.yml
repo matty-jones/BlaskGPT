@@ -1,30 +1,31 @@
 # /opt/llm/compose.yml
 services:
-  llamacpp:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: llamacpp
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm
     deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
-    volumes: ["/opt/llm/models/gguf:/models:ro"]
+    volumes: ["/opt/llm/models/hf-cache:/root/.cache/huggingface"]
     command:
       - --model
-      - /models/blaskgpt.gguf
-      - --alias
+      - warshanks/Josiefied-Qwen3-4B-abliterated-v2-AWQ
+      - --served-model-name
       - blaskgpt
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --ctx-size
-      - "16384"
-      - --n-gpu-layers
-      - "999"
-      - --n-cpu-moe
-      - "32"
-      - --jinja
-      - --flash-attn
+      - --dtype
       - auto
-    ports:
-      - "8082:8080"
+      - --max-model-len
+      - "16384"
+      - --gpu-memory-utilization
+      - "0.80"
+      - --max-num-seqs
+      - "2"
+      - --kv-cache-dtype
+      - fp8
+      - --enable-prefix-caching
+      - --api-key
+      - local-dev-key
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - hermes
     networks:
       - llm-network
     restart: unless-stopped
@@ -41,12 +42,12 @@ services:
     environment:
       - HA_URL=${HA_URL}
       - HA_ACCESS_TOKEN=${HA_ACCESS_TOKEN}
-      - VLLM_URL=http://llamacpp:8080
+      - VLLM_URL=http://vllm:8000
       - VLLM_API_KEY=local-dev-key
       - API_PORT=8080
       - API_HOST=0.0.0.0
     depends_on:
-      - llamacpp
+      - vllm
     networks:
       - llm-network
     restart: unless-stopped
@@ -60,7 +61,7 @@ services:
       - WEBUI_SECRET_KEY=assumingofcourseweredealingwithfivedimensionalobjectsinabasiceuclideangeometricuniverse
       - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=
       - JWT_EXPIRES_IN=-1
-      - OPENAI_API_BASE_URL=http://llamacpp:8080/v1
+      - OPENAI_API_BASE_URL=http://vllm:8000/v1
       - OPENAI_API_KEY=local-dev-key
       - OPENAI_VERIFY_SSL=false
     volumes:
@@ -68,7 +69,7 @@ services:
     networks:
       - llm-network
     depends_on:
-      - llamacpp
+      - vllm
     restart: unless-stopped
 
   searxng:

@@ -1,0 +1,18 @@
+use_default_settings: true
+
+server:
+  secret_key: "wobbeyblobbydo"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: duckduckgo
+    inactive: true
+  - name: ahmia
+    inactive: true
+  - name: torch
+    inactive: true
