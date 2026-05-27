@@ -428,7 +428,10 @@ Respond with ONLY the use case name (one word), nothing else."""
                         {"role": "user", "content": f"/no_think {message}"}
                     ],
                     "temperature": 0.1,  # Low temperature for consistent classification
-                    "max_tokens": 10  # Just need the use case name
+                    "max_tokens": 10,  # Just need the use case name
+                    "chat_template_kwargs": {
+                        "enable_thinking": False
+                    }
                 }
             )
             response.raise_for_status()

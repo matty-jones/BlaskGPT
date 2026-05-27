@@ -129,7 +129,7 @@ async def _run_tool_flow(
                 "Content-Type": "application/json",
             },
             json={
-                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                "model": "blaskgpt",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": message},
@@ -143,6 +143,9 @@ async def _run_tool_flow(
                 "tool_choice": "auto",
                 "temperature": 0.3,
                 "max_tokens": max_tokens,
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                },
             },
         )
         if first.status_code != 200:
@@ -249,12 +252,15 @@ async def _run_tool_flow(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                    "model": "blaskgpt",
                     "messages": follow_messages,
                     "tools": tools,
                     "tool_choice": "auto",
                     "temperature": 0.3,
                     "max_tokens": max_tokens,
+                    "chat_template_kwargs": {
+                        "enable_thinking": False
+                    },
                 },
             )
             second.raise_for_status()
@@ -322,11 +328,14 @@ async def _run_tool_flow(
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                        "model": "blaskgpt",
                         "messages": final_messages,
                         "tools": tools,
                         "temperature": 0.3,
                         "max_tokens": max_tokens,
+                        "chat_template_kwargs": {
+                            "enable_thinking": False
+                        },
                     },
                 )
                 final.raise_for_status()
@@ -407,12 +416,15 @@ async def _retry_with_entity_listing(
             "Content-Type": "application/json",
         },
             json={
-                "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+                "model": "blaskgpt",
                 "messages": retry_messages,
                 "tools": tools,
                 "tool_choice": "required",
                 "temperature": 0.3,
                 "max_tokens": max_tokens,
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                },
             },
     )
     retry.raise_for_status()
@@ -461,11 +473,14 @@ async def _retry_with_entity_listing(
             "Content-Type": "application/json",
         },
         json={
-            "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+            "model": "blaskgpt",
             "messages": follow_messages,
             "tools": tools,
             "temperature": 0.3,
             "max_tokens": max_tokens,
+            "chat_template_kwargs": {
+                "enable_thinking": False
+            },
         },
     )
     final.raise_for_status()
