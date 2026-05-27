@@ -232,6 +232,13 @@ async def _run_tool_flow(
                 logger.warning(f"Tool execution returned error: {execution_result}")
                 return execution_result
 
+            # Fast path: simple on/off actions do not need a second LLM call just to say "done".
+            if function_name in ("turn_on_entity", "turn_off_entity"):
+                entity_id = function_args.get("entity_id", "entity")
+                state_word = "on" if function_name == "turn_on_entity" else "off"
+                friendly = entity_id.replace("switch.", "").replace("light.", "").replace("_", " ")
+                return f"{friendly.title()} turned {state_word}."
+
             follow_messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},

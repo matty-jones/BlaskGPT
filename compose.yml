@@ -29,6 +29,37 @@ services:
       - llm-network
     restart: unless-stopped
 
+  llamacpp-ha:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llamacpp-ha
+    deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
+    volumes: ["/opt/llm/models/gguf:/models:ro"]
+    command:
+      - --model
+      - /models/blaskgpt-ha.gguf
+      - --alias
+      - blaskgpt-ha
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "4096"
+      - --parallel
+      - "1"
+      - --cache-ram
+      - "0"
+      - --n-gpu-layers
+      - "24"
+      - --jinja
+      - --reasoning
+      - "off"
+      - --flash-attn
+      - auto
+    networks:
+      - llm-network
+    restart: unless-stopped
+
   api-gateway:
     build:
       context: /opt/llm
@@ -41,7 +72,7 @@ services:
     environment:
       - HA_URL=${HA_URL}
       - HA_ACCESS_TOKEN=${HA_ACCESS_TOKEN}
-      - VLLM_URL=http://llamacpp:8080
+      - VLLM_URL=http://llamacpp-ha:8080
       - VLLM_API_KEY=local-dev-key
       - API_PORT=8080
       - API_HOST=0.0.0.0

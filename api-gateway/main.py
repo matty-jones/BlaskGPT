@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional, Dict, Any, List, Union
@@ -395,9 +396,28 @@ async def webhook_variation(request: Request):
 # Helper functions
 async def _detect_use_case(message: str) -> str:
     """
-    Use LLM to intelligently detect the use case based on message content.
-    This is more flexible than keyword matching and handles edge cases better.
+    Use a fast local keyword route for obvious HA commands, then fall back to LLM classification.
     """
+    msg = message.lower().strip()
+
+    ha_fast_patterns = [
+        r"\bturn\s+(on|off)\b",
+        r"\bswitch\s+(on|off)\b",
+        r"\bset\s+.*\b(light|lights|lamp|lamps|volume|brightness|timer)\b",
+        r"\b(dim|brighten)\b",
+        r"\b(lock|unlock)\b",
+        r"\b(play|pause|resume|stop|skip)\b",
+        r"\b(volume|mute|unmute)\b",
+        r"\b(start|set|cancel|stop)\s+.*\btimer\b",
+        r"\badd\s+.*\b(shopping list|shopping|list)\b",
+        r"\b(find|ring)\s+my\s+phone\b",
+        r"\bwhat\s+(lights|switches|speakers|devices|entities)\b",
+    ]
+
+    if any(re.search(pattern, msg) for pattern in ha_fast_patterns):
+        logger.info("Fast-classified message as: ha_command")
+        return "ha_command"
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             classification_prompt = """Classify the user's message into one of these use cases:
@@ -951,7 +971,6 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                     
                                     # Clean up the response
                                     matched_entity_id = matched_entity_id.strip('"\'`')
-                                    import re
                                     entity_id_match = re.search(r'([a-z_]+\.\S+)', matched_entity_id)
                                     if entity_id_match:
                                         matched_entity_id = entity_id_match.group(1)
@@ -1098,7 +1117,6 @@ async def _execute_ha_function(function_name: str, args: Dict[str, Any], origina
                                     # Clean up the response (remove quotes, extra text)
                                     matched_entity_id = matched_entity_id.strip('"\'`')
                                     # Extract entity_id if LLM added extra text
-                                    import re
                                     entity_id_match = re.search(r'([a-z_]+\.\S+)', matched_entity_id)
                                     if entity_id_match:
                                         matched_entity_id = entity_id_match.group(1)
