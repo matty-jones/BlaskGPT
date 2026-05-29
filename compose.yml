@@ -4,7 +4,7 @@ services:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llamacpp
     deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
-    volumes: ["/opt/llm/models/gguf:/models:ro"]
+    volumes: ["/opt/llm/models/gguf:/models:ro", "/opt/llm/templates:/templates:ro"]
     command:
       - --model
       - /models/blaskgpt.gguf
@@ -15,12 +15,24 @@ services:
       - --port
       - "8080"
       - --ctx-size
-      - "16384"
+      - "131072"
+      - --parallel
+      - "1"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
       - --n-gpu-layers
       - "999"
       - --n-cpu-moe
       - "32"
       - --jinja
+      - --chat-template-file
+      - /templates/qwen3.6-fixed-chat-template.jinja
+      - --reasoning
+      - off
+      - --swa-full
+      - --no-context-shift
       - --flash-attn
       - auto
     ports:
