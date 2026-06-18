@@ -35,6 +35,7 @@ services:
       - --no-context-shift
       - --flash-attn
       - auto
+      - --metrics
     ports:
       - "8082:8080"
     networks:
@@ -68,6 +69,7 @@ services:
       - "off"
       - --flash-attn
       - auto
+      - --metrics
     networks:
       - llm-network
     restart: unless-stopped
