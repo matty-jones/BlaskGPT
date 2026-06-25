@@ -1,5 +1,7 @@
 models/
 temp/
+*.bak.*
+run-logs/
 
 # Python
 __pycache__/
@@ -55,6 +57,7 @@ Thumbs.db
 
 # Model cache - Hugging Face models are large and shouldn't be in git
 hf_cache/
+.venv-hf/
 
 # Docker
 .dockerignore
