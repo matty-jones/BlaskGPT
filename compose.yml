@@ -129,6 +129,9 @@ services:
       - OPENAI_API_BASE_URL=http://llamacpp:8080/v1
       - OPENAI_API_KEY=local-dev-key
       - OPENAI_VERIFY_SSL=false
+      - CORS_ALLOW_ORIGIN=https://chat.lab.jones-family.co.uk
+      - WEBUI_SESSION_COOKIE_SECURE=true
+      - WEBUI_AUTH_COOKIE_SECURE=true
     volumes:
       - open-webui:/app/backend/data
     networks:
