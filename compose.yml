@@ -165,11 +165,13 @@ services:
     restart: unless-stopped
     networks:
       - llm-network
-    # Optional: expose UI to LAN for debugging
-    # ports:
-    #   - "8081:8080"
+    environment:
+      - BRAVE_API_KEY=${BRAVE_API_KEY}
     volumes:
-      - /opt/llm/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - /opt/llm/searxng/settings.yml:/etc/searxng/settings.template.yml:ro
+      - /opt/llm/searxng/entrypoint.sh:/usr/local/bin/blask-searxng-entrypoint:ro
+    entrypoint:
+      - /usr/local/bin/blask-searxng-entrypoint
     logging:
       driver: local
       options:

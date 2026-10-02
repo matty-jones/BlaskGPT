@@ -21,7 +21,7 @@ engines:
 
   - name: braveapi
     engine: braveapi
-    api_key: 'BSAjVZBWoNlMIIS3u4KxUix8gCpf7Vs'
+    api_key: '__BRAVE_API_KEY__'
     results_per_page: 20
 
   - name: startpage
