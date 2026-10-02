@@ -46,6 +46,11 @@ services:
     networks:
       - llm-network
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   llamacpp-ha:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
@@ -100,6 +105,11 @@ services:
     networks:
       - llm-network
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "3"
 
 
   claude-normalizer:
@@ -116,6 +126,11 @@ services:
     networks:
       - llm-network
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   blaskgpt:
     image: ghcr.io/open-webui/open-webui:main
@@ -139,6 +154,11 @@ services:
     depends_on:
       - llamacpp
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   searxng:
     image: searxng/searxng:latest
@@ -150,6 +170,28 @@ services:
     #   - "8081:8080"
     volumes:
       - /opt/llm/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  tor:
+    build:
+      context: ./tor
+    image: llm-tor
+    restart: unless-stopped
+    networks:
+      - llm-network
+
+    volumes:
+      - ./tor/torrc:/etc/tor/torrc:ro
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
 networks:
   llm-network:

@@ -10,9 +10,48 @@ search:
     - json
 
 engines:
+  # General web search: deliberately maintain several independent fallbacks.
   - name: duckduckgo
-    inactive: true
+    disabled: false
+    inactive: false
+
+  - name: brave
+    disabled: false
+    inactive: false
+
+  - name: braveapi
+    engine: braveapi
+    api_key: 'BSAjVZBWoNlMIIS3u4KxUix8gCpf7Vs'
+    results_per_page: 20
+
+  - name: startpage
+    disabled: false
+    inactive: false
+
+  - name: bing
+    disabled: false
+    inactive: false
+
+  - name: qwant
+    disabled: false
+    inactive: false
+
+  - name: yahoo
+    disabled: false
+    inactive: false
+
+  # Useful for entity/reference queries, but never our only surviving engine.
+  - name: wikipedia
+    disabled: false
+    inactive: false
+
+  # Tor/onion search engines disabled, we do them differently in the tool because SearXNG was flakey
   - name: ahmia
     inactive: true
+
   - name: torch
     inactive: true
+
+outgoing:
+  max_request_timeout: 60
+  extra_proxy_timeout: 20

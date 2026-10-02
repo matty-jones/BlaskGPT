@@ -366,29 +366,65 @@ async def messages(request: Request):
     return JSONResponse(content=data)
 
 
+_HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+}
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def passthrough(path: str, request: Request):
-    # Basic passthrough for /v1/models, metrics, etc.
+    # Stream the upstream body. Closing this response closes the upstream
+    # connection so a cancelled client stops llama.cpp decoding.
     method = request.method
     raw_body = await request.body()
-
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in {"host", "content-length"}
+        if k.lower() not in {"host", "content-length", "connection"}
     }
-
-    async with httpx.AsyncClient(timeout=None) as client:
-        upstream = await client.request(
-            method,
-            f"{UPSTREAM_BASE_URL}/{path}",
-            headers=headers,
-            content=raw_body,
-            params=dict(request.query_params),
+    client = httpx.AsyncClient(timeout=None)
+    try:
+        upstream = await client.send(
+            client.build_request(
+                method,
+                f"{UPSTREAM_BASE_URL}/{path}",
+                headers=headers,
+                content=raw_body,
+                params=dict(request.query_params),
+            ),
+            stream=True,
         )
+    except Exception:
+        await client.aclose()
+        raise
 
-    return Response(
-        content=upstream.content,
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    forwarded = {
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in _HOP_BY_HOP
+    }
+    return StreamingResponse(
+        body(),
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type"),
+        headers=forwarded,
     )
