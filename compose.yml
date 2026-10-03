@@ -4,10 +4,11 @@ services:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llamacpp
     deploy: { resources: { reservations: { devices: [ { capabilities: [gpu] } ] } } }
-    volumes: ["/opt/llm/models/gguf:/models:ro", "/opt/llm/templates:/templates:ro"]
+    volumes:
+      - /opt/llm/models/gguf:/models:ro
     command:
       - --model
-      - /models/blaskgpt.gguf
+      - /models/KAT-Philly-MTP-Q4_K_M.gguf
       - --alias
       - blaskgpt
       - --host
@@ -22,27 +23,20 @@ services:
       - q8_0
       - --cache-type-v
       - q8_0
-      - --n-gpu-layers
-      - "999"
-      - --n-cpu-moe
-      - "32"
+      - --load-mode
+      - none
       - --jinja
       - --no-skip-chat-parsing
-      - --chat-template-file
-      - /templates/qwen3.6-fixed-chat-template.jinja
       - --reasoning
-      - off
+      - "on"
       - --reasoning-format
-      - none
-      - --chat-template-kwargs
-      - '{"enable_thinking":false,"preserve_thinking":false}'
-      - --swa-full
+      - deepseek
       - --no-context-shift
       - --flash-attn
       - auto
       - --metrics
     ports:
-      - "127.0.0.1:18082:8080"
+      - "8082:8080"
     networks:
       - llm-network
     restart: unless-stopped
@@ -100,27 +94,6 @@ services:
       - VLLM_API_KEY=local-dev-key
       - API_PORT=8080
       - API_HOST=0.0.0.0
-    depends_on:
-      - llamacpp
-    networks:
-      - llm-network
-    restart: unless-stopped
-    logging:
-      driver: local
-      options:
-        max-size: "20m"
-        max-file: "3"
-
-
-  claude-normalizer:
-    build:
-      context: /opt/llm/anthropic-normalizer
-    container_name: claude-normalizer
-    ports: ["8082:8080"]
-    environment:
-      - UPSTREAM_BASE_URL=http://llamacpp:8080
-      - NORMALIZER_FAIL_CLOSED=true
-      - NORMALIZER_STRIP_THINK=true
     depends_on:
       - llamacpp
     networks:
